@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/SilverRain0716/AI_Ktrader/main/schemas/briefing.schema.json",
+  "title": "구조화된 브리핑",
+  "description": "자연어 증시 브리핑을 기계가 읽을 수 있는 형태로 변환한 결과. 브리핑 생성 시점에 함께 출력하거나, 기존 아카이브를 소급 파싱해 생성한다.",
+  "type": "object",
+  "required": ["briefing_id", "kind", "published_at", "market", "views"],
+  "additionalProperties": false,
+  "properties": {
+    "briefing_id": {
+      "type": "string",
+      "description": "YYYY-MM-DD-HHMM-kind 형식. 예: 2026-08-21-0800-kr-premarket",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}-\\d{4}-[a-z-]+$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "kr-premarket-deep",
+        "midday-economy",
+        "kr-preclose-leaders",
+        "kr-close-deep",
+        "us-premarket",
+        "us-close-deep"
+      ]
+    },
+    "published_at": { "type": "string", "format": "date-time" },
+    "market": { "type": "string", "enum": ["KR", "US", "GLOBAL"] },
+    "source_url": {
+      "type": "string",
+      "description": "원문 브리핑 위치 (GitLab raw 등)"
+    },
+    "index_snapshot": {
+      "type": "object",
+      "description": "브리핑에 실린 지수 수치. 승계 오류 추적용으로 그대로 보존한다.",
+      "additionalProperties": false,
+      "properties": {
+        "kospi": { "$ref": "#/$defs/indexPoint" },
+        "kosdaq": { "$ref": "#/$defs/indexPoint" },
+        "sp500": { "$ref": "#/$defs/indexPoint" },
+        "nasdaq_composite": { "$ref": "#/$defs/indexPoint" },
+        "nasdaq100": { "$ref": "#/$defs/indexPoint" },
+        "dow": { "$ref": "#/$defs/indexPoint" },
+        "usdkrw": { "$ref": "#/$defs/indexPoint" },
+        "is_intraday": {
+          "type": "boolean",
+          "description": "true면 장중 스냅샷. 종가로 승계해서는 안 된다."
+        }
+      }
+    },
+    "flows": {
+      "type": "object",
+      "description": "투자자별 수급. 확정치인지 잠정치인지 반드시 구분한다.",
+      "additionalProperties": false,
+      "properties": {
+        "confirmed": { "type": "boolean" },
+        "kospi": { "$ref": "#/$defs/flowSet" },
+        "kosdaq": { "$ref": "#/$defs/flowSet" }
+      }
+    },
+    "disclosures": {
+      "type": "array",
+      "description": "DART 당일 주요 공시",
+      "items": {
+        "type": "object",
+        "required": ["code", "report_name", "rcept_no"],
+        "additionalProperties": false,
+        "properties": {
+          "code": { "$ref": "#/$defs/stockCode" },
+          "name": { "type": "string" },
+          "report_name": { "type": "string" },
+          "rcept_no": { "type": "string" },
+          "category": {
+            "type": "string",
+            "enum": [
+              "실적", "공급계약", "유상증자", "전환사채", "신주인수권부사채",
+              "무상증자", "합병분할", "영업양수도", "자기주식", "최대주주변경",
+              "불성실공시", "감자", "상장폐지", "기타"
+            ]
+          },
+          "sentiment": { "type": "string", "enum": ["호재", "악재", "중립", "판단보류"] }
+        }
+      }
+    },
+    "views": {
+      "type": "array",
+      "description": "종목별 관점 블록. 브리핑의 핵심 산출물.",
+      "items": { "$ref": "#/$defs/view" }
+    },
+    "retro": {
+      "type": "array",
+      "description": "이전 브리핑 관점에 대한 복기. 빗나간 항목을 반드시 포함한다.",
+      "items": {
+        "type": "object",
+        "required": ["code", "prior_stance", "outcome"],
+        "additionalProperties": false,
+        "properties": {
+          "code": { "$ref": "#/$defs/stockCode" },
+          "prior_briefing_id": { "type": "string" },
+          "prior_stance": { "$ref": "#/$defs/stance" },
+          "outcome": { "type": "string", "enum": ["적중", "빗나감", "판단보류", "확인불가"] },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "events_ahead": {
+      "type": "array",
+      "description": "예정된 이벤트 (지표 발표, 실적, 국내 일정)",
+      "items": {
+        "type": "object",
+        "required": ["when", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "when": { "type": "string", "format": "date-time" },
+          "title": { "type": "string" },
+          "related_codes": { "type": "array", "items": { "$ref": "#/$defs/stockCode" } },
+          "consensus": { "type": "string" },
+          "previous": { "type": "string" }
+        }
+      }
+    },
+    "parse_warnings": {
+      "type": "array",
+      "description": "파싱 중 발견한 문제. 값 불일치, 확인불가 항목 등. 비어 있지 않으면 AI 판단 시 신뢰도를 낮춘다.",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "stockCode": {
+      "type": "string",
+      "pattern": "^[0-9]{6}$",
+      "description": "6자리 종목코드. 계열사(우선주·홀딩스·스팩) 혼동 금지."
+    },
+    "stance": {
+      "type": "string",
+      "enum": ["주목", "조건부", "경계", "회피"],
+      "description": "주목=촉매가 구조적이고 수급이 뒷받침 / 조건부=이벤트 결과에 갈림 / 경계=근거가 일회성·수급 편중 / 회피=확인된 역풍"
+    },
+    "confidence": { "type": "string", "enum": ["상", "중상", "중", "하"] },
+    "indexPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "number" },
+        "change_pct": { "type": "number" },
+        "as_of": { "type": "string", "format": "date-time" }
+      }
+    },
+    "flowSet": {
+      "type": "object",
+      "description": "단위는 억원. 코스피/코스닥 구분과 단위 혼동이 잦은 지점이다.",
+      "additionalProperties": false,
+      "properties": {
+        "foreign_bil_krw": { "type": "number" },
+        "institution_bil_krw": { "type": "number" },
+        "retail_bil_krw": { "type": "number" }
+      }
+    },
+    "view": {
+      "type": "object",
+      "required": ["code", "stance", "confidence", "reasons", "invalidation"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/stockCode" },
+        "name": { "type": "string" },
+        "stance": { "$ref": "#/$defs/stance" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "catalyst": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "summary": { "type": "string" },
+            "date": { "type": "string", "format": "date" },
+            "type": {
+              "type": "string",
+              "enum": ["실적", "공시", "수주", "정책", "섹터", "수급", "테마", "확인불가"]
+            },
+            "durability": {
+              "type": "string",
+              "enum": ["구조적", "일회성", "판단보류"],
+              "description": "지속성 평가. 일회성이면 스윙 보유 근거가 약하다."
+            }
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 2,
+          "description": "출처가 확인된 사실 2개 이상. '테마 강세'는 근거가 아니다.",
+          "items": { "type": "string" }
+        },
+        "invalidation": {
+          "type": "string",
+          "description": "반증 가능한 단일 사건. 양방향 서술('A 또는 반대로 B')과 동어반복('주가가 빠지면') 금지."
+        },
+        "check_at": { "type": "string", "format": "date-time" },
+        "sources": { "type": "array", "items": { "type": "string", "format": "uri" } }
+      }
+    }
+  }
+}

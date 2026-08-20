@@ -1,0 +1,37 @@
+# 설치:  pip install pre-commit && pre-commit install
+# 전체 검사: pre-commit run --all-files
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+        name: 시크릿 스캔 (gitleaks)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-json
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: no-commit-to-branch
+        args: ["--branch", "main"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.2
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: no-env-file
+        name: .env 커밋 차단
+        entry: bash -c 'git diff --cached --name-only | grep -E "(^|/)\.env$|secrets\.(json|enc)$" && { echo "시크릿 파일은 커밋할 수 없습니다."; exit 1; } || exit 0'
+        language: system
+        pass_filenames: false

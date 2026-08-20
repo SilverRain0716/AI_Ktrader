@@ -1,0 +1,60 @@
+# ── 시크릿 (절대 커밋 금지) ─────────────────────────────
+.env
+.env.*
+!.env.example
+secrets.json
+secrets.enc
+*.pem
+*.key
+*.p12
+credentials*.json
+token*.json
+appkey*
+*_secret*
+.secrets.baseline.local
+
+# ── 데이터 (용량·저작권) ────────────────────────────────
+data/raw/
+data/cache/
+data/warehouse/
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+*.parquet
+*.csv
+!tests/fixtures/*.csv
+*.ndjson
+!tests/fixtures/*.ndjson
+
+# ── 운용 산출물 ─────────────────────────────────────────
+logs/
+reports/
+decisions/
+state/
+*.log
+
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ── 에디터/OS ──────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

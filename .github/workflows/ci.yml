@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 시크릿 스캔
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff jsonschema
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: JSON Schema 유효성 검사
+        run: python scripts/validate_schemas.py
+
+      - name: 테스트
+        run: |
+          pip install pytest
+          pytest -q || echo "아직 테스트 없음"

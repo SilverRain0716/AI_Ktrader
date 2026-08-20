@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/SilverRain0716/AI_Ktrader/main/schemas/decision.schema.json",
+  "title": "AI 판단 결과",
+  "description": "AI 판단 엔진의 유일한 출력 형식. 자유 텍스트는 받지 않는다. 이 스키마를 통과하지 못한 출력은 전체를 거부하고 재요청한다 — 부분 파싱하지 않는다.",
+  "type": "object",
+  "required": ["decision_id", "pack_id", "generated_at", "valid_until", "market_view", "decisions", "abstain"],
+  "additionalProperties": false,
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "description": "YYYYMMDD-HHMM-랜덤4자리. 멱등키. 같은 id의 주문은 두 번 나가지 않는다.",
+      "pattern": "^\\d{8}-\\d{4}-[a-f0-9]{4}$"
+    },
+    "pack_id": { "type": "string", "description": "판단 근거가 된 컨텍스트 팩 id" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "이 시각 이후 결정은 폐기된다. 장 마감 이후로 넘기지 않는다."
+    },
+    "model": { "type": "string", "description": "판단에 사용된 모델 식별자. 성과 귀속에 필요." },
+    "market_view": {
+      "type": "string",
+      "maxLength": 1200,
+      "description": "오늘 시장에 대한 종합 판단 한 문단. 개별 종목 결정의 전제."
+    },
+    "abstain": {
+      "type": "boolean",
+      "description": "true면 신규 진입을 하지 않는다. 근거 있는 후보가 없을 때 반드시 이 값을 쓴다 — 자리를 채우기 위해 근거가 약한 종목을 넣지 않는다."
+    },
+    "abstain_reason": { "type": ["string", "null"] },
+    "decisions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/decision" }
+    },
+    "portfolio_note": {
+      "type": "string",
+      "description": "포트폴리오 전체 관점. 예: 'A 진입을 위해 B를 먼저 축소', '섹터 집중도가 한도에 근접'"
+    },
+    "data_concerns": {
+      "type": "array",
+      "description": "입력 데이터에서 발견한 문제. 비어 있지 않으면 실행 계층이 신뢰도를 낮춘다.",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "stockCode": { "type": "string", "pattern": "^[0-9]{6}$" },
+    "decision": {
+      "type": "object",
+      "required": ["action", "code", "confidence", "reasons", "invalidation"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["BUY", "ADD", "HOLD", "TRIM", "EXIT"],
+          "description": "BUY=신규 진입 / ADD=추가 매수 / HOLD=유지 / TRIM=일부 축소 / EXIT=전량 청산"
+        },
+        "code": { "$ref": "#/$defs/stockCode" },
+        "name": { "type": "string" },
+        "weight_pct": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100,
+          "description": "BUY/ADD: 목표 비중. TRIM: 축소 후 남길 비중. HOLD/EXIT: null"
+        },
+        "entry": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string", "enum": ["MARKET", "LIMIT", "COND"] },
+            "price": { "type": ["integer", "null"] },
+            "condition": {
+              "type": ["string", "null"],
+              "description": "COND일 때만. 실행 계층이 감시할 수 있는 형태여야 한다. 예: '시가 대비 -1.0% 이하 터치'"
+            },
+            "valid_until": { "type": ["string", "null"], "format": "date-time" }
+          }
+        },
+        "stop": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "description": "손절 기준. ATR 배수를 권장한다 — 고정 %는 변동성 큰 종목에서 노이즈에 털리고 작은 종목에서 늦게 잘린다.",
+          "properties": {
+            "type": { "type": "string", "enum": ["ATR", "PCT", "PRICE"] },
+            "value": { "type": "number" }
+          }
+        },
+        "target": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string", "enum": ["ATR", "PCT", "PRICE"] },
+            "value": { "type": "number" }
+          }
+        },
+        "trail": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "activation_pct": { "type": "number" },
+            "drop_pct": { "type": "number" }
+          }
+        },
+        "max_hold_days": { "type": ["integer", "null"], "minimum": 1, "maximum": 30 },
+        "confidence": { "type": "string", "enum": ["상", "중상", "중", "하"] },
+        "reasons": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 6,
+          "description": "확인된 사실 2개 이상. 정량 지표와 브리핑 근거를 각각 명시한다. '테마 강세', '많이 올랐다'는 근거가 아니다.",
+          "items": { "type": "string", "maxLength": 300 }
+        },
+        "invalidation": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "이 판단이 틀렸음을 알 수 있는 반증 가능한 단일 사건. 실행 계층이 감시 조건으로 등록한다. 양방향 서술('A 또는 반대로 B')과 동어반복('주가가 빠지면') 금지."
+        },
+        "briefing_refs": {
+          "type": "array",
+          "description": "근거로 삼은 브리핑 id. 브리핑 근거 없이 정량만으로 판단했다면 빈 배열.",
+          "items": { "type": "string" }
+        },
+        "sources": { "type": "array", "items": { "type": "string", "format": "uri" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "enum": ["BUY", "ADD"] } } },
+          "then": {
+            "required": ["weight_pct", "entry", "stop", "max_hold_days"],
+            "description": "신규·추가 매수는 비중·진입방식·손절·최대보유일이 반드시 있어야 한다. 손절 없는 진입은 거부한다."
+          }
+        },
+        {
+          "if": { "properties": { "action": { "const": "TRIM" } } },
+          "then": { "required": ["weight_pct"] }
+        }
+      ]
+    }
+  }
+}
