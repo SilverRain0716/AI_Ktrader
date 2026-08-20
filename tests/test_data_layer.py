@@ -133,11 +133,16 @@ def conn(tmp_path):
     c.close()
 
 
-def test_스키마_버전_불일치는_예외(tmp_path):
+def test_미래_스키마_버전은_거부한다(tmp_path):
+    """구버전 코드로 최신 DB를 열면 조용히 망가진다. 열기 전에 막는다.
+
+    (v2부터 전진 마이그레이션을 지원하므로 '과거 버전'은 더 이상 예외가 아니다.
+     전진 동작은 tests/test_dart.py::test_v1_db가_v2로_전진한다 에서 검증한다.)
+    """
     c = sqlite3.connect(tmp_path / "v.db", isolation_level=None)
     store.init_db(c)
     c.execute("PRAGMA user_version=999")
-    with pytest.raises(RuntimeError, match="스키마 버전 불일치"):
+    with pytest.raises(RuntimeError, match="최신"):
         store.init_db(c)
     c.close()
 
