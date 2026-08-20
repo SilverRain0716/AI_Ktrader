@@ -5,6 +5,7 @@
     python -m data.pipeline ohlcv --limit 50     # 일봉 적재 (시총 상위 N)
     python -m data.pipeline ohlcv --full         # 전체 기간 재적재
     python -m data.pipeline flows --limit 50     # 종목별 기관·외국인 수급
+    python -m data.pipeline disclosures --days 5 # DART 공시 수집
     python -m data.pipeline indicators           # 지표 계산
     python -m data.pipeline daily --limit 300    # 위를 순서대로 (운영 배치)
     python -m data.pipeline status               # 적재 현황
@@ -21,8 +22,8 @@ import sys
 from datetime import datetime, timedelta
 
 from data import config, indicators, store
+from data.sources import dart, naver
 from data.sources import listing as listing_src
-from data.sources import naver
 
 log = logging.getLogger("pipeline")
 
@@ -145,6 +146,63 @@ def task_flows(conn, *, limit: int | None, pages: int) -> None:
     log.info("수급 완료 — 성공 %d / 실패 %d", ok, fail)
 
 
+def task_disclosures(conn, *, days: int) -> None:
+    """최근 N일 DART 공시.
+
+    공시는 언론 기사가 아니라 원문에서 확보한다. 기사에 실리지 않는 공시를 놓치지 않기 위해서다.
+    인증키가 없으면 배치 전체를 죽이지 않고 이 태스크만 건너뛴다.
+    """
+    started = _now()
+    try:
+        dart._api_key()
+    except dart.DartKeyMissing as e:
+        log.warning("공시 수집 건너뜀 — %s", e)
+        store.log_ingest(
+            conn,
+            started_at=started,
+            task="disclosures",
+            target=None,
+            status="skip",
+            detail=str(e)[:500],
+        )
+        return
+
+    today = config.today_kst()
+    total = material = 0
+    for offset in range(days):
+        day = today - timedelta(days=offset)
+        if day.weekday() >= 5:  # 주말에는 공시가 없다
+            continue
+        try:
+            df = dart.fetch_disclosures(day)
+            rows = store.upsert_disclosures(conn, df)
+            n_material = int(df["material"].sum()) if not df.empty else 0
+            total += rows
+            material += n_material
+            store.log_ingest(
+                conn,
+                started_at=started,
+                task="disclosures",
+                target=day.isoformat(),
+                status="ok",
+                rows=rows,
+                detail=f"주요 {n_material}건",
+            )
+            log.info("공시 %s — 전체 %d건 / 주요 %d건", day, rows, n_material)
+        except Exception as e:
+            log.warning("공시 실패 %s: %s", day, e)
+            store.log_ingest(
+                conn,
+                started_at=started,
+                task="disclosures",
+                target=day.isoformat(),
+                status="fail",
+                detail=str(e)[:500],
+            )
+
+    log.info("공시 완료 — 누적 %d건 (주요 %d건)", total, material)
+
+
 def task_indicators(conn, *, limit: int | None) -> None:
     started = _now()
 
@@ -235,10 +293,14 @@ def task_status(conn) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="data.pipeline", description="일일 데이터 배치")
-    p.add_argument("task", choices=["listing", "ohlcv", "flows", "indicators", "daily", "status"])
+    p.add_argument(
+        "task",
+        choices=["listing", "ohlcv", "flows", "disclosures", "indicators", "daily", "status"],
+    )
     p.add_argument("--limit", type=int, default=None, help="대상 종목 수 (시총 상위)")
     p.add_argument("--full", action="store_true", help="전체 기간 재적재")
     p.add_argument("--pages", type=int, default=1, help="수급 페이지 수 (1페이지=20영업일)")
+    p.add_argument("--days", type=int, default=5, help="공시 수집 대상 일수 (오늘부터 역순)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -253,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
             task_ohlcv(conn, limit=args.limit, full=args.full)
         elif args.task == "flows":
             task_flows(conn, limit=args.limit, pages=args.pages)
+        elif args.task == "disclosures":
+            task_disclosures(conn, days=args.days)
         elif args.task == "indicators":
             task_indicators(conn, limit=args.limit)
         elif args.task == "status":
@@ -261,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             task_listing(conn)
             task_ohlcv(conn, limit=args.limit, full=args.full)
             task_flows(conn, limit=args.limit, pages=args.pages)
+            task_disclosures(conn, days=args.days)
             task_indicators(conn, limit=args.limit)
             task_status(conn)
 

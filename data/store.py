@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -87,6 +87,23 @@ CREATE TABLE IF NOT EXISTS indicators (
 );
 CREATE INDEX IF NOT EXISTS idx_indicators_date ON indicators(date);
 
+CREATE TABLE IF NOT EXISTS disclosures (
+    rcept_no  TEXT PRIMARY KEY,       -- DART 접수번호. 멱등키.
+    rcept_dt  TEXT NOT NULL,          -- YYYYMMDD
+    corp_code TEXT NOT NULL,          -- DART 고유번호 (종목코드와 다르다)
+    code      TEXT,                   -- 6자리 종목코드. 비상장 법인은 NULL
+    corp_name TEXT,
+    corp_cls  TEXT,                   -- Y 유가 / K 코스닥
+    report_nm TEXT NOT NULL,
+    category  TEXT NOT NULL,          -- schemas/briefing.schema.json 의 enum과 일치
+    material  INTEGER NOT NULL,       -- 노이즈 필터 통과 여부
+    filer     TEXT,
+    remark    TEXT,
+    url       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_disc_dt ON disclosures(rcept_dt);
+CREATE INDEX IF NOT EXISTS idx_disc_code ON disclosures(code, rcept_dt);
+
 -- 배치 실행 기록. 어떤 날 무엇이 실패했는지 남지 않으면 결손을 발견할 수 없다.
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,16 +132,37 @@ def connect(db_path: Path | None = None):
         conn.close()
 
 
+# 전진 마이그레이션. 키는 "도달할 버전", 값은 그 버전으로 올리는 SQL.
+# _SCHEMA 는 전부 IF NOT EXISTS 라 새 테이블 추가는 재실행만으로 반영된다.
+# ALTER 가 필요한 변경만 여기에 적는다.
+_MIGRATIONS: dict[int, str] = {
+    2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
+}
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
+
     if current == 0:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-    elif current != SCHEMA_VERSION:
+        return
+    if current == SCHEMA_VERSION:
+        return
+    if current > SCHEMA_VERSION:
         raise RuntimeError(
-            f"스키마 버전 불일치: DB={current}, 코드={SCHEMA_VERSION}. "
-            "마이그레이션을 작성하기 전에는 진행하지 않는다."
+            f"DB 스키마({current})가 코드({SCHEMA_VERSION})보다 최신이다. "
+            "구버전 코드로 최신 DB를 건드리지 않는다."
         )
+
+    for version in range(current + 1, SCHEMA_VERSION + 1):
+        if version not in _MIGRATIONS:
+            raise RuntimeError(f"v{version} 마이그레이션이 정의되지 않았다.")
+        sql = _MIGRATIONS[version]
+        if sql.strip():
+            conn.executescript(sql)
+        log.info("스키마 마이그레이션 v%d → v%d", version - 1, version)
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 # ── 쓰기 ────────────────────────────────────────────────
@@ -266,6 +304,61 @@ def upsert_indicators(conn: sqlite3.Connection, code: str, on: date, payload_jso
     )
 
 
+def upsert_disclosures(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """접수번호가 멱등키다. 같은 날 여러 번 돌려도 중복되지 않는다."""
+    if df.empty:
+        return 0
+    rows = [
+        (
+            r.rcept_no,
+            r.rcept_dt,
+            r.corp_code,
+            r.code,
+            r.corp_name,
+            r.corp_cls,
+            r.report_nm,
+            r.category,
+            int(bool(r.material)),
+            r.filer,
+            r.remark,
+            r.url,
+        )
+        for r in df.itertuples(index=False)
+    ]
+    conn.executemany(
+        """INSERT INTO disclosures
+           (rcept_no,rcept_dt,corp_code,code,corp_name,corp_cls,
+            report_nm,category,material,filer,remark,url)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(rcept_no) DO UPDATE SET
+             report_nm=excluded.report_nm, category=excluded.category,
+             material=excluded.material, remark=excluded.remark""",
+        rows,
+    )
+    return len(rows)
+
+
+def load_disclosures(
+    conn: sqlite3.Connection,
+    *,
+    start: date,
+    end: date,
+    codes: Iterable[str] | None = None,
+    material_only: bool = True,
+) -> pd.DataFrame:
+    """컨텍스트 팩의 disclosures 블록에 넣을 공시를 뽑는다."""
+    sql = "SELECT * FROM disclosures WHERE rcept_dt BETWEEN ? AND ?"
+    params: list = [start.strftime("%Y%m%d"), end.strftime("%Y%m%d")]
+    if material_only:
+        sql += " AND material=1"
+    code_list = list(codes) if codes is not None else None
+    if code_list:
+        sql += f" AND code IN ({','.join('?' * len(code_list))})"
+        params.extend(code_list)
+    sql += " ORDER BY rcept_dt DESC, rcept_no"
+    return pd.read_sql_query(sql, conn, params=params)
+
+
 def log_ingest(
     conn: sqlite3.Connection,
     *,
@@ -337,7 +430,7 @@ def delisted_codes(conn: sqlite3.Connection) -> set[str]:
 
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     out = {}
-    for t in ("ohlcv", "listing", "delisting", "flows", "indicators"):
+    for t in ("ohlcv", "listing", "delisting", "flows", "indicators", "disclosures"):
         out[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
     return out
 

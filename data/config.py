@@ -28,6 +28,13 @@ NAVER_REQUEST_INTERVAL_SEC = 0.35
 NAVER_TIMEOUT_SEC = 20
 NAVER_MAX_RETRY = 3
 
+# DART OpenAPI. 인증키당 1일 20,000건이라 여유롭지만, 예의상 간격을 둔다.
+DART_REQUEST_INTERVAL_SEC = 0.2
+DART_TIMEOUT_SEC = 20
+DART_MAX_RETRY = 3
+DART_PAGE_COUNT = 100  # 페이지당 최대치
+DART_MAX_PAGES = 30  # 하루 3,000건이면 충분하다. 초과 시 경고를 남긴다.
+
 # 일봉 최초 적재 시작일. 지표 계산에 필요한 최소 구간보다 넉넉히 잡는다.
 DEFAULT_HISTORY_START = date(2015, 1, 1)
 
