@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -104,6 +104,51 @@ CREATE TABLE IF NOT EXISTS disclosures (
 CREATE INDEX IF NOT EXISTS idx_disc_dt ON disclosures(rcept_dt);
 CREATE INDEX IF NOT EXISTS idx_disc_code ON disclosures(code, rcept_dt);
 
+-- ── 브리핑 구조화 (Phase 2) ─────────────────────────────
+CREATE TABLE IF NOT EXISTS briefings (
+    briefing_id    TEXT PRIMARY KEY,   -- YYYY-MM-DD-<stem>
+    day            TEXT NOT NULL,
+    stem           TEXT NOT NULL,      -- 원본 파일명. 스케줄 개편 이력 추적용
+    kind           TEXT NOT NULL,      -- 정규화 종류
+    published_at   TEXT NOT NULL,
+    market         TEXT NOT NULL,
+    source_url     TEXT,
+    summary        TEXT,
+    heading        TEXT,
+    sections       TEXT NOT NULL,      -- JSON. 원문 섹션 통째 보존 — 재추출 시 GitLab 재조회 불필요
+    disclosure_refs TEXT NOT NULL,     -- JSON. DART 접수번호 참조 (공시 본문은 disclosures 테이블이 정본)
+    parse_warnings TEXT NOT NULL,      -- JSON. 비어있지 않으면 AI 판단 시 신뢰도를 낮춘다
+    view_count     INTEGER NOT NULL,
+    ingested_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_brief_day ON briefings(day);
+CREATE INDEX IF NOT EXISTS idx_brief_kind ON briefings(kind, day);
+
+CREATE TABLE IF NOT EXISTS briefing_views (
+    briefing_id      TEXT NOT NULL,
+    seq              INTEGER NOT NULL,
+    day              TEXT NOT NULL,
+    kind             TEXT NOT NULL,
+    market           TEXT NOT NULL,
+    code             TEXT,             -- 6자리 한국 종목코드. 매핑 실패 시 NULL
+    symbol           TEXT,             -- 미국 티커
+    name             TEXT,
+    stance           TEXT NOT NULL,    -- 주목 | 조건부 | 경계 | 회피
+    stance_inherited INTEGER NOT NULL,
+    confidence       TEXT,             -- 원문에 없으면 NULL
+    confidence_note  TEXT,
+    catalyst         TEXT,
+    reasons          TEXT NOT NULL,    -- JSON 배열
+    invalidation     TEXT,
+    check_at         TEXT,
+    kr_links         TEXT,             -- JSON 배열
+    sources          TEXT,             -- JSON 배열
+    raw              TEXT,
+    PRIMARY KEY (briefing_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_view_code ON briefing_views(code, day);
+CREATE INDEX IF NOT EXISTS idx_view_day ON briefing_views(day, kind);
+
 -- 배치 실행 기록. 어떤 날 무엇이 실패했는지 남지 않으면 결손을 발견할 수 없다.
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +182,7 @@ def connect(db_path: Path | None = None):
 # ALTER 가 필요한 변경만 여기에 적는다.
 _MIGRATIONS: dict[int, str] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
+    3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
 }
 
 
@@ -359,6 +405,113 @@ def load_disclosures(
     return pd.read_sql_query(sql, conn, params=params)
 
 
+def upsert_briefing(conn: sqlite3.Connection, parsed: dict, *, stem: str, ingested_at: str) -> int:
+    """브리핑 1건과 그 관점들을 저장한다. briefing_id 가 멱등키다."""
+    import json as _json
+
+    bid = parsed["briefing_id"]
+    conn.execute(
+        """INSERT INTO briefings
+           (briefing_id,day,stem,kind,published_at,market,source_url,summary,heading,
+            sections,disclosure_refs,parse_warnings,view_count,ingested_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(briefing_id) DO UPDATE SET
+             kind=excluded.kind, published_at=excluded.published_at,
+             summary=excluded.summary, heading=excluded.heading,
+             sections=excluded.sections, disclosure_refs=excluded.disclosure_refs,
+             parse_warnings=excluded.parse_warnings, view_count=excluded.view_count,
+             ingested_at=excluded.ingested_at""",
+        (
+            bid,
+            bid[:10],
+            stem,
+            parsed["kind"],
+            parsed["published_at"],
+            parsed["market"],
+            parsed.get("source_url"),
+            parsed.get("summary"),
+            parsed.get("heading"),
+            _json.dumps(parsed.get("sections", {}), ensure_ascii=False),
+            _json.dumps(parsed.get("disclosures", []), ensure_ascii=False),
+            _json.dumps(parsed.get("parse_warnings", []), ensure_ascii=False),
+            len(parsed.get("views", [])),
+            ingested_at,
+        ),
+    )
+    # 재파싱 시 관점이 줄어들 수 있으므로 통째로 교체한다
+    conn.execute("DELETE FROM briefing_views WHERE briefing_id=?", (bid,))
+    rows = []
+    for i, v in enumerate(parsed.get("views", [])):
+        cat = v.get("catalyst")
+        rows.append(
+            (
+                bid,
+                i,
+                bid[:10],
+                parsed["kind"],
+                v.get("market", parsed["market"]),
+                v.get("code"),
+                v.get("symbol"),
+                v.get("name"),
+                v["stance"],
+                int(bool(v.get("stance_inherited"))),
+                v.get("confidence"),
+                v.get("confidence_note"),
+                (cat or {}).get("summary") if isinstance(cat, dict) else cat,
+                _json.dumps(v.get("reasons", []), ensure_ascii=False),
+                v.get("invalidation"),
+                v.get("check_at"),
+                _json.dumps(v.get("kr_links", []), ensure_ascii=False),
+                _json.dumps(v.get("sources", []), ensure_ascii=False),
+                v.get("raw"),
+            )
+        )
+    if rows:
+        conn.executemany(
+            """INSERT INTO briefing_views
+               (briefing_id,seq,day,kind,market,code,symbol,name,stance,stance_inherited,
+                confidence,confidence_note,catalyst,reasons,invalidation,check_at,
+                kr_links,sources,raw)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+    return len(rows)
+
+
+def briefing_ids(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT briefing_id FROM briefings").fetchall()}
+
+
+def load_views(
+    conn: sqlite3.Connection,
+    *,
+    start: date,
+    end: date,
+    market: str | None = None,
+    stances: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """컨텍스트 팩용 관점 조회."""
+    sql = "SELECT * FROM briefing_views WHERE day BETWEEN ? AND ?"
+    params: list = [start.isoformat(), end.isoformat()]
+    if market:
+        sql += " AND market=?"
+        params.append(market)
+    st = list(stances) if stances else None
+    if st:
+        sql += f" AND stance IN ({','.join('?' * len(st))})"
+        params.extend(st)
+    sql += " ORDER BY day DESC, briefing_id, seq"
+    return pd.read_sql_query(sql, conn, params=params)
+
+
+def name_to_code_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """종목명 → 코드. 공백을 제거해 '한화에어로 스페이스' 같은 표기 흔들림을 흡수한다."""
+    out: dict[str, str] = {}
+    for code, name in conn.execute("SELECT code, name FROM listing WHERE name IS NOT NULL"):
+        out[name.replace(" ", "")] = code
+    return out
+
+
 def log_ingest(
     conn: sqlite3.Connection,
     *,
@@ -430,7 +583,16 @@ def delisted_codes(conn: sqlite3.Connection) -> set[str]:
 
 def counts(conn: sqlite3.Connection) -> dict[str, int]:
     out = {}
-    for t in ("ohlcv", "listing", "delisting", "flows", "indicators", "disclosures"):
+    for t in (
+        "ohlcv",
+        "listing",
+        "delisting",
+        "flows",
+        "indicators",
+        "disclosures",
+        "briefings",
+        "briefing_views",
+    ):
         out[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
     return out
 
