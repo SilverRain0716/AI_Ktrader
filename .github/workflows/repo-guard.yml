@@ -1,0 +1,57 @@
+name: Repo Guard
+
+# 이 저장소는 "당분간 public" 상태로 운영된다 (ADR 0004).
+# 전환 시점을 사람의 기억에 맡기지 않기 위해, 위험 구간에 진입하면 CI가 실패한다.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 0 * * 1"   # 매주 월요일, 잊고 지나가지 않도록
+
+jobs:
+  visibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: public 상태에서 실행 계층 코드 차단
+        env:
+          IS_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -e
+          if [ "$IS_PRIVATE" = "true" ]; then
+            echo "저장소가 private이다. 검사를 통과한다."
+            exit 0
+          fi
+
+          echo "저장소가 public 상태다. 위험 구간 진입 여부를 검사한다."
+          fail=0
+
+          # (1) 주문을 내는 코드가 들어오면 더는 public일 수 없다
+          if find execution -name "*.py" -not -name "__init__.py" 2>/dev/null | grep -q .; then
+            echo "::error::execution/ 에 코드가 있는데 저장소가 public이다."
+            echo "   실계좌 주문 경로가 열리는 지점이다. private으로 전환하라 (ADR 0004)."
+            fail=1
+          fi
+
+          # (2) 실계좌 설정이 커밋되면 즉시 차단
+          if grep -rniE "EXECUTION_MODE\s*=\s*live|KIWOOM_ENV\s*=\s*real" \
+               --include="*.py" --include="*.toml" --include="*.yml" --include="*.yaml" \
+               --exclude=".env.example" . 2>/dev/null | grep -v "repo-guard.yml"; then
+            echo "::error::실계좌 설정이 커밋되어 있는데 저장소가 public이다."
+            fail=1
+          fi
+
+          # (3) 조건식 정의가 채워지면 전략이 공개된다 — 경고만
+          if [ -f docs/condition-definitions.md ] && \
+             grep -qE "^### AI_" docs/condition-definitions.md 2>/dev/null; then
+            echo "::warning::조건식 정의가 채워져 있다. 전략이 공개 노출된다."
+          fi
+
+          exit $fail
+
+      - name: 시크릿 스캔
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
