@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  lint-and-validate:
+  lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: 시크릿 스캔
         uses: gitleaks/gitleaks-action@v2
@@ -21,9 +23,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 의존성 설치
+        # 테스트가 data.sources.listing(FinanceDataReader) 까지 import 하므로 data extra 도 필요하다.
         run: |
           python -m pip install --upgrade pip
-          pip install ruff jsonschema
+          pip install -e ".[dev,data]"
 
       - name: Lint
         run: |
@@ -34,6 +37,6 @@ jobs:
         run: python scripts/validate_schemas.py
 
       - name: 테스트
-        run: |
-          pip install pytest
-          pytest -q || echo "아직 테스트 없음"
+        # 실패를 삼키지 않는다. 지금까지의 버그를 고정해 둔 회귀 테스트가
+        # 방어선 역할을 하려면 여기서 빌드가 깨져야 한다. (점검 2026-08-22 결함 1)
+        run: pytest -q
