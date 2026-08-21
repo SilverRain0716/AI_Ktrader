@@ -282,7 +282,14 @@
             "$ref": "#/$defs/stockCode"
           },
           "name": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "market": {
             "type": "string",
@@ -292,7 +299,15 @@
             ]
           },
           "sector": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "업종 대분류(14종). 섹터 집중도 한도는 이 값으로 판정한다. 분류 불명이면 null."
           },
           "indicators": {
             "$ref": "#/$defs/indicators"
