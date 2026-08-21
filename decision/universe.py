@@ -3,7 +3,7 @@
 AI는 여기 없는 종목을 신규 진입 대상으로 고를 수 없다. 환각을 막는 장치이자
 동시에 시야의 한계다. 그래서 "무엇을 넣을지"가 이 시스템에서 가장 중요한 규칙이다.
 
-1단계 하드 필터  : 거래 불가·유동성 부족·규모 미달을 잘라낸다
+1단계 하드 필터  : 거래 불가·관리종목·유동성 부족·규모 미달을 잘라낸다
 2단계 3채널 랭킹 : 성격이 다른 세 경로에서 각각 뽑아 합집합을 만든다
 
 **단일 점수로 정렬하지 않는다.** 하나의 스코어로 줄을 세우면 그 스코어가 좋아하는
@@ -35,18 +35,58 @@ class Candidate:
     screen_reasons: list[str] = field(default_factory=list)
 
     def to_pack_item(self) -> dict:
-        return {
-            "code": self.code,
-            "name": self.name,
-            "market": self.market if self.market in ("KOSPI", "KOSDAQ") else None,
-            "sector": self.sector,
-            "indicators": self.indicators,
-            "flows": self.flows,
-            "tradable": True,  # 하드 필터를 통과했다는 뜻
-            "screen_reasons": self.screen_reasons,
-            "channels": self.channels,
-            "condition_search_hits": [],
-        }
+        return _compact(
+            {
+                "code": self.code,
+                "name": self.name,
+                "market": self.market if self.market in ("KOSPI", "KOSDAQ") else None,
+                "sector": self.sector,
+                "indicators": _round_indicators(self.indicators),
+                "flows": _round_flows(self.flows),
+                "tradable": True,  # 하드 필터를 통과했다는 뜻
+                "screen_reasons": self.screen_reasons,
+                "channels": self.channels,
+            }
+        )
+
+
+# ── 컨텍스트 절약 ───────────────────────────────────────
+# 종목 하나가 821자(≈313토큰)나 됐다. 60종목이면 유니버스만 18,000토큰으로
+# 팩 상한에 육박한다. 원인은 과도한 소수점(1167933.3333)과 중복 필드였다.
+# AI 판단에 소수점 4자리는 아무 의미가 없고, 주의만 분산시킨다.
+
+# 이동평균 원값은 싣지 않는다 — ma_aligned(정배열 여부)와 disparity20_pct(이격도)로 충분하다.
+_DROP_INDICATORS = ("ma5", "ma20", "ma60")
+# 가격 계열은 정수, 나머지는 소수점 둘째 자리
+_INT_FIELDS = ("close", "atr14", "macd_hist")
+
+
+def _round_indicators(ind: dict) -> dict:
+    out: dict = {}
+    for k, v in ind.items():
+        if k in _DROP_INDICATORS or v is None:
+            continue
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, float)):
+            out[k] = round(v) if k in _INT_FIELDS else round(float(v), 2)
+        else:
+            out[k] = v
+    return out
+
+
+def _round_flows(flows: dict) -> dict:
+    out: dict = {}
+    for k, v in flows.items():
+        if v is None or k == "as_of":  # as_of 는 data_quality.flows_as_of 에 이미 있다
+            continue
+        out[k] = round(float(v), 2) if isinstance(v, float) else v
+    return out
+
+
+def _compact(d: dict) -> dict:
+    """null 과 빈 컬렉션을 뺀다. 스키마상 전부 선택 필드다."""
+    return {k: v for k, v in d.items() if v is not None and v != [] and v != {}}
 
 
 @dataclass
@@ -65,11 +105,12 @@ def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
 
     rows = conn.execute(
         """
-        SELECT l.code, l.name, l.market, l.sector, i.payload
+        SELECT l.code, l.name, l.market, l.sector_group, i.payload
         FROM listing l
         JOIN indicators i ON i.code = l.code
         WHERE l.is_preferred = 0
           AND l.is_spac = 0
+          AND l.is_managed = 0
           AND i.date = (SELECT MAX(date) FROM indicators WHERE code = l.code)
           AND l.code NOT IN (SELECT DISTINCT code FROM delisting)
           AND l.code NOT IN (

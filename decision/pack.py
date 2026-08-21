@@ -93,7 +93,13 @@ def _briefings_block(conn: sqlite3.Connection, generated_at: datetime, cycle: st
     ).fetchall()
 
     out: list[dict] = []
+    # 36시간 창에는 같은 종류가 이틀치 들어온다(전일 18:00 + 당일 18:00).
+    # 낡은 쪽은 토큰만 먹고 AI가 어느 것이 최신인지 헷갈린다. 종류별 최신 1건만 싣는다.
+    seen_kinds: set[str] = set()
     for bid, kind, pub, market, summary, warns in rows:
+        if kind in seen_kinds:
+            continue
+        seen_kinds.add(kind)
         views = [
             {
                 "code": r[0],
