@@ -176,7 +176,10 @@ def test_우선주_스팩_제외(conn):
             "name": ["삼성전자", "삼성전자우", "아무개제3호스팩"],
             "market": ["KOSPI"] * 3,
             "sector": [None] * 3,
+            "sector_group": ["기타"] * 3,
             "industry": [None] * 3,
+            "dept": [None] * 3,
+            "is_managed": [False] * 3,
             "listing_date": [pd.NaT] * 3,
             "market_cap": [1e12, 1e11, 1e9],
             "shares": [1e9] * 3,
@@ -207,3 +210,12 @@ def test_네이버_액면분할_구간_실측():
     halted = df[df["halted"]]
     assert len(halted) == 3
     assert (halted["volume"] == 0).all()
+
+
+def test_KOSDAQ_GLOBAL은_KOSDAQ으로_정규화된다():
+    """FDR은 코스닥 우량주 50종목을 'KOSDAQ GLOBAL'로 준다.
+    이걸 빼면 알테오젠·에코프로비엠 같은 코스닥 대장주가 통째로 빠진다 (실제로 그랬다)."""
+    from data.sources import listing as ls
+
+    assert "KOSDAQ GLOBAL" in ls._MARKETS
+    assert ls._MARKET_NORMALIZE["KOSDAQ GLOBAL"] == "KOSDAQ"

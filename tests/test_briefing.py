@@ -263,3 +263,22 @@ def test_정의되지_않은_확신도는_null_과_경고():
     p = parser.parse("2026-08-20", "1800-kr-close-deep", "## t\n\n[종목]\n" + block)
     assert p.views[0]["confidence"] is None
     assert any("확신도 표기를 인식하지 못함" in w for w in p.parse_warnings)
+
+
+@pytest.mark.parametrize(
+    "line,stance,conf",
+    [
+        ("1. 삼성전자(005930) 281,500원 +3.78% — 주목/확신도 중상", "주목", "중상"),
+        ("3. 카카오(035720) 매매거래정지 — 조건부/확신도 중", "조건부", "중"),
+        ("4. 알테오젠(196170) 코스닥 급락 동반 하락 — 경계/확신도 중", "경계", "중"),
+    ],
+)
+def test_라벨_없이_헤더에_붙은_관점(line, stance, conf):
+    """2026-08-21부터 '관점:' 라벨이 사라진 형식이 등장했다. 3건이 통째로 누락됐었다."""
+    r = parser.parse_stance(line)
+    assert r["stance"] == stance and r["confidence"] == conf
+
+
+def test_복기_문장을_관점으로_오인하지_않는다():
+    """'SK하이닉스 주목(중상) → +12.73%' 는 복기이지 새 관점이 아니다."""
+    assert parser.parse_stance("1. SK하이닉스 주목(중상) → +12.73%. 관점 적중") is None

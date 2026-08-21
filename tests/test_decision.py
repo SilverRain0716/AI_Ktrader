@@ -68,12 +68,29 @@ def _seed_stock(
     market="KOSPI",
     is_pref=0,
     is_spac=0,
+    managed=False,
     sector="반도체",
 ):
     conn.execute(
-        "INSERT OR REPLACE INTO listing (code,name,market,sector,industry,listing_date,"
-        "market_cap,shares,is_preferred,is_spac,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (code, name, market, sector, None, None, cap * 1e8, None, is_pref, is_spac, "seed"),
+        "INSERT OR REPLACE INTO listing (code,name,market,sector,sector_group,industry,dept,"
+        "is_managed,listing_date,market_cap,shares,is_preferred,is_spac,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            code,
+            name,
+            market,
+            sector,
+            sector,
+            None,
+            None,
+            int(managed),
+            None,
+            cap * 1e8,
+            None,
+            is_pref,
+            is_spac,
+            "seed",
+        ),
     )
     payload = {
         "indicators": {
@@ -201,6 +218,12 @@ def test_하드필터_거래정지_흔적_제외(db):
     _seed_stock(db, "900004", "정지주")
     _seed_ohlcv(db, "900004", halted_recent=True)
     assert "900004" not in universe.hard_filter(db, AS_OF)
+
+
+def test_하드필터_관리종목_제외(db):
+    """FDR의 소속부 표시로 관리종목 118개를 걸러낼 수 있다 (실측)."""
+    _seed_stock(db, "900006", "관리종목", managed=True)
+    assert "900006" not in universe.hard_filter(db, AS_OF)
 
 
 def test_하드필터_상장폐지_이력_제외(db):
