@@ -103,6 +103,7 @@ DB는 `data/warehouse/market.db` (gitignore). `AIK_DATA_DIR`로 위치를 바꿀
 - [조사: 키움 조건검색식](docs/research/kiwoom-condition-search.md)
 - [조사: 데이터 소스](docs/research/data-sources.md)
 - [조사: K-Trader 코드 리뷰](docs/research/ktrader-code-review.md)
+- [첫 실제 적재에서 드러난 것](docs/02-first-real-run.md) — 버그 3건·설계 오류 2건
 - [ADR](docs/adr/) — 왜 그렇게 결정했는가
 
 ---
