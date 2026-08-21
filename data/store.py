@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -149,6 +149,46 @@ CREATE TABLE IF NOT EXISTS briefing_views (
 CREATE INDEX IF NOT EXISTS idx_view_code ON briefing_views(code, day);
 CREATE INDEX IF NOT EXISTS idx_view_day ON briefing_views(day, kind);
 
+-- ── 페이퍼 포지션 (Phase 3~5) ───────────────────────────
+-- 실행 계층이 생기기 전까지 포지션의 정본. 파생값(평가손익·보유일수·비중)은
+-- 저장하지 않고 조회 시 매번 재계산한다 — 누적 카운터를 두지 않는 원칙.
+CREATE TABLE IF NOT EXISTS paper_positions (
+    position_id       TEXT PRIMARY KEY,
+    code              TEXT NOT NULL,
+    name              TEXT,
+    qty               INTEGER NOT NULL,
+    avg_price         INTEGER NOT NULL,
+    opened_at         TEXT NOT NULL,
+    closed_at         TEXT,              -- NULL 이면 보유 중
+    entry_decision_id TEXT,              -- 이 포지션을 만든 결정
+    entry_thesis      TEXT,              -- 진입 근거. 이게 아직 유효한지가 보유 판단의 핵심
+    invalidation      TEXT,              -- 진입 시 설정한 무효화 조건
+    invalidation_hit  INTEGER NOT NULL DEFAULT 0,
+    stop_price        INTEGER,
+    target_price      INTEGER,
+    max_hold_days     INTEGER,
+    exit_reason       TEXT,
+    exit_price        INTEGER,
+    realized_pnl_krw  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pos_open ON paper_positions(closed_at, code);
+
+-- ── 컨텍스트 팩 (감사 추적) ─────────────────────────────
+-- 결정 JSON이 pack_id 를 참조한다. "왜 그때 그렇게 판단했는가"를 물으면
+-- 그 시점의 입력 전체를 그대로 복원할 수 있어야 한다.
+CREATE TABLE IF NOT EXISTS context_packs (
+    pack_id        TEXT PRIMARY KEY,
+    cycle          TEXT NOT NULL,
+    generated_at   TEXT NOT NULL,
+    universe_size  INTEGER NOT NULL,
+    position_count INTEGER NOT NULL,
+    view_count     INTEGER NOT NULL,
+    warning_count  INTEGER NOT NULL,
+    est_tokens     INTEGER,
+    payload        TEXT NOT NULL      -- 팩 전문 JSON
+);
+CREATE INDEX IF NOT EXISTS idx_pack_cycle ON context_packs(cycle, generated_at);
+
 -- 배치 실행 기록. 어떤 날 무엇이 실패했는지 남지 않으면 결손을 발견할 수 없다.
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +223,7 @@ def connect(db_path: Path | None = None):
 _MIGRATIONS: dict[int, str] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
+    4: "",  # paper_positions·context_packs 추가 — _SCHEMA 재실행으로 충분
 }
 
 
