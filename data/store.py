@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -44,8 +44,11 @@ CREATE TABLE IF NOT EXISTS listing (
     code         TEXT PRIMARY KEY,
     name         TEXT,
     market       TEXT,
-    sector       TEXT,
+    sector       TEXT,          -- 한국표준산업분류 원문 (158종)
+    sector_group TEXT,          -- 14개 대분류. 섹터 집중도 한도는 이걸로 판정한다
     industry     TEXT,
+    dept         TEXT,          -- 코스닥 소속부. 관리종목 식별의 유일한 무료 신호
+    is_managed   INTEGER NOT NULL DEFAULT 0,
     listing_date TEXT,
     market_cap   REAL,
     shares       REAL,
@@ -217,13 +220,31 @@ def connect(db_path: Path | None = None):
         conn.close()
 
 
-# 전진 마이그레이션. 키는 "도달할 버전", 값은 그 버전으로 올리는 SQL.
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """ALTER TABLE ADD COLUMN 을 멱등하게. 이미 있으면 아무것도 하지 않는다.
+
+    _SCHEMA 는 CREATE TABLE IF NOT EXISTS 라 새로 만드는 DB에는 컬럼이 이미 들어 있다.
+    구버전 DB에만 ALTER 가 필요하므로 무조건 실행하면 duplicate column 으로 깨진다.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "listing", "sector_group", "TEXT")
+    _add_column_if_missing(conn, "listing", "dept", "TEXT")
+    _add_column_if_missing(conn, "listing", "is_managed", "INTEGER NOT NULL DEFAULT 0")
+
+
+# 전진 마이그레이션. 키는 "도달할 버전", 값은 그 버전으로 올리는 작업.
 # _SCHEMA 는 전부 IF NOT EXISTS 라 새 테이블 추가는 재실행만으로 반영된다.
-# ALTER 가 필요한 변경만 여기에 적는다.
-_MIGRATIONS: dict[int, str] = {
+# ALTER 가 필요한 변경만 여기에 함수로 적는다.
+_MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
     4: "",  # paper_positions·context_packs 추가 — _SCHEMA 재실행으로 충분
+    5: _migrate_v5,  # listing 컬럼 추가
 }
 
 
@@ -245,9 +266,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     for version in range(current + 1, SCHEMA_VERSION + 1):
         if version not in _MIGRATIONS:
             raise RuntimeError(f"v{version} 마이그레이션이 정의되지 않았다.")
-        sql = _MIGRATIONS[version]
-        if sql.strip():
-            conn.executescript(sql)
+        step = _MIGRATIONS[version]
+        if callable(step):
+            step(conn)
+        elif isinstance(step, str) and step.strip():
+            conn.executescript(step)
         log.info("스키마 마이그레이션 v%d → v%d", version - 1, version)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
@@ -306,7 +329,10 @@ def replace_listing(conn: sqlite3.Connection, df: pd.DataFrame, *, updated_at: s
             r.name,
             r.market,
             r.sector,
+            r.sector_group,
             r.industry,
+            r.dept,
+            int(bool(r.is_managed)),
             r.listing_date.isoformat() if pd.notna(r.listing_date) else None,
             None if pd.isna(r.market_cap) else float(r.market_cap),
             None if pd.isna(r.shares) else float(r.shares),
@@ -318,9 +344,9 @@ def replace_listing(conn: sqlite3.Connection, df: pd.DataFrame, *, updated_at: s
     ]
     conn.executemany(
         """INSERT INTO listing
-           (code,name,market,sector,industry,listing_date,market_cap,shares,
-            is_preferred,is_spac,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+           (code,name,market,sector,sector_group,industry,dept,is_managed,listing_date,
+            market_cap,shares,is_preferred,is_spac,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         rows,
     )
     return len(rows)
@@ -603,6 +629,7 @@ def tradable_codes(
     *,
     exclude_preferred: bool = True,
     exclude_spac: bool = True,
+    exclude_managed: bool = True,
     min_market_cap: float | None = None,
 ) -> list[str]:
     sql = "SELECT code FROM listing WHERE 1=1"
@@ -611,6 +638,8 @@ def tradable_codes(
         sql += " AND is_preferred=0"
     if exclude_spac:
         sql += " AND is_spac=0"
+    if exclude_managed:
+        sql += " AND is_managed=0"
     if min_market_cap is not None:
         sql += " AND market_cap >= ?"
         params.append(min_market_cap)
