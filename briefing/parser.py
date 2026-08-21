@@ -58,6 +58,14 @@ _BLOCK_PAREN = re.compile(r"^(\d{1,2})\)\s+(.+)$")
 _STANCE_ONLY = re.compile(
     r"관점\s*[:：]?\s*(?P<stance>주목|조건부|경계|회피)\s*(?:\((?P<inherit>[^)]*)\))?"
 )
+# 2026-08-21 부터 '관점' 라벨 없이 헤더에 바로 붙는 형식이 등장했다.
+#   '1. 삼성전자(005930) 281,500원 +3.78% — 주목/확신도 중상'
+# 라벨 없이 관점 단어만으로 매칭하면 복기 문장('SK하이닉스 주목(중상) → +12.7%')까지 잡힌다.
+# 그래서 앞에 구분선(—)이 오고 뒤에 '/확신도'가 따라오는 경우로 한정한다.
+_STANCE_BARE = re.compile(
+    r"[—–-]\s*(?P<stance>주목|조건부|경계|회피)\s*(?:\((?P<inherit>[^)]*)\))?\s*/\s*확신도"
+)
+
 _CONF_ONLY = re.compile(
     r"확신도\s*[:：=]?\s*(?P<conf>중상|중하|상|중|하)\s*(?:\((?P<note>[^)]*)\))?"
 )
@@ -125,7 +133,7 @@ def parse_stance(text: str) -> dict | None:
     확신도가 없는 브리핑이 실제로 존재하므로(2026-08-17 0800) 관점만 있어도 성립시킨다.
     없는 값을 지어내지 않고 None 으로 둔다.
     """
-    ms = _STANCE_ONLY.search(text)
+    ms = _STANCE_ONLY.search(text) or _STANCE_BARE.search(text)
     if not ms:
         return None
     inherit = (ms.group("inherit") or "").strip()
