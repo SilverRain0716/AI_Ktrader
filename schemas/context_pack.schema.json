@@ -4,14 +4,34 @@
   "title": "컨텍스트 팩",
   "description": "AI 판단 엔진의 단일 입력. 정량 지표 + 브리핑 + 계좌·포지션 + 제약을 한 덩어리로 묶는다. AI는 이것 외의 상태를 알지 못한다 — 여기 없는 정보는 판단에 반영되지 않는다.",
   "type": "object",
-  "required": ["pack_id", "generated_at", "cycle", "account", "positions", "constraints", "universe"],
+  "required": [
+    "pack_id",
+    "generated_at",
+    "cycle",
+    "account",
+    "positions",
+    "constraints",
+    "universe"
+  ],
   "additionalProperties": false,
   "properties": {
-    "pack_id": { "type": "string", "description": "YYYYMMDD-HHMM-cycle 형식" },
-    "generated_at": { "type": "string", "format": "date-time" },
+    "pack_id": {
+      "type": "string",
+      "description": "YYYYMMDD-HHMM-cycle 형식"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "cycle": {
       "type": "string",
-      "enum": ["premarket", "midday", "preclose", "postmarket", "event"],
+      "enum": [
+        "premarket",
+        "midday",
+        "preclose",
+        "postmarket",
+        "event"
+      ],
       "description": "premarket 08:20 / midday 12:20 / preclose 15:00 / postmarket 18:30 / event=무효화 조건 트리거"
     },
     "event_trigger": {
@@ -21,10 +41,21 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["invalidation_hit", "vi_triggered", "stop_approach", "condition_search_entry", "disclosure", "index_shock"]
+          "enum": [
+            "invalidation_hit",
+            "vi_triggered",
+            "stop_approach",
+            "condition_search_entry",
+            "disclosure",
+            "index_shock"
+          ]
         },
-        "code": { "$ref": "#/$defs/stockCode" },
-        "detail": { "type": "string" }
+        "code": {
+          "$ref": "#/$defs/stockCode"
+        },
+        "detail": {
+          "type": "string"
+        }
       }
     },
     "market": {
@@ -32,37 +63,77 @@
       "description": "시장 상태. 브리핑 값이 아니라 데이터 계층이 직접 계산한 값을 쓴다.",
       "additionalProperties": false,
       "properties": {
-        "session": { "type": "string", "enum": ["CLOSED", "PRE", "REGULAR", "AUCTION", "POST"] },
-        "kospi": { "$ref": "#/$defs/indexState" },
-        "kosdaq": { "$ref": "#/$defs/indexState" },
-        "usdkrw": { "type": "number" },
+        "session": {
+          "type": "string",
+          "enum": [
+            "CLOSED",
+            "PRE",
+            "REGULAR",
+            "AUCTION",
+            "POST"
+          ]
+        },
+        "kospi": {
+          "$ref": "#/$defs/indexState"
+        },
+        "kosdaq": {
+          "$ref": "#/$defs/indexState"
+        },
+        "usdkrw": {
+          "type": "number"
+        },
         "us_overnight": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "sp500_pct": { "type": "number" },
-            "nasdaq_pct": { "type": "number" },
-            "sox_pct": { "type": "number" },
-            "futures_pct": { "type": "number" }
+            "sp500_pct": {
+              "type": "number"
+            },
+            "nasdaq_pct": {
+              "type": "number"
+            },
+            "sox_pct": {
+              "type": "number"
+            },
+            "futures_pct": {
+              "type": "number"
+            }
           }
         },
         "sector_returns": {
           "type": "object",
           "description": "KRX 업종지수 등락률. 키=업종명, 값=%",
-          "additionalProperties": { "type": "number" }
+          "additionalProperties": {
+            "type": "number"
+          }
         }
       }
     },
     "account": {
       "type": "object",
-      "required": ["total_equity_krw", "cash_available_krw"],
+      "required": [
+        "total_equity_krw",
+        "cash_available_krw"
+      ],
       "additionalProperties": false,
       "properties": {
-        "total_equity_krw": { "type": "integer", "description": "예수금 + 보유 평가금" },
-        "cash_available_krw": { "type": "integer", "description": "미체결·주문잠금 차감 후 실제 가용액" },
-        "realized_pnl_today_krw": { "type": "integer" },
-        "unrealized_pnl_krw": { "type": "integer" },
-        "is_mock": { "type": "boolean" }
+        "total_equity_krw": {
+          "type": "integer",
+          "description": "예수금 + 보유 평가금"
+        },
+        "cash_available_krw": {
+          "type": "integer",
+          "description": "미체결·주문잠금 차감 후 실제 가용액"
+        },
+        "realized_pnl_today_krw": {
+          "type": "integer"
+        },
+        "unrealized_pnl_krw": {
+          "type": "integer"
+        },
+        "is_mock": {
+          "type": "boolean"
+        }
       }
     },
     "positions": {
@@ -70,29 +141,128 @@
       "description": "현재 보유 종목. AI는 이걸 보고 유지·축소·청산을 판단한다.",
       "items": {
         "type": "object",
-        "required": ["code", "qty", "avg_price", "current_price", "net_yield_pct", "held_days"],
+        "required": [
+          "code",
+          "qty",
+          "avg_price",
+          "current_price",
+          "net_yield_pct",
+          "held_days"
+        ],
         "additionalProperties": false,
         "properties": {
-          "code": { "$ref": "#/$defs/stockCode" },
-          "name": { "type": "string" },
-          "qty": { "type": "integer" },
-          "avg_price": { "type": "integer" },
-          "current_price": { "type": "integer" },
+          "code": {
+            "$ref": "#/$defs/stockCode"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "qty": {
+            "type": "integer"
+          },
+          "avg_price": {
+            "type": "integer"
+          },
+          "current_price": {
+            "type": "integer"
+          },
           "net_yield_pct": {
             "type": "number",
             "description": "수수료·거래세 차감 후 순수익률. 총수익률과 혼동 금지."
           },
-          "high_since_entry": { "type": "integer" },
-          "weight_pct": { "type": "number", "description": "총자산 대비 비중" },
-          "held_days": { "type": "integer" },
-          "entry_decision_id": { "type": "string", "description": "이 포지션을 만든 결정의 id" },
-          "entry_thesis": { "type": "string", "description": "진입 당시 근거. 이게 아직 유효한지가 보유 판단의 핵심." },
-          "invalidation": { "type": "string", "description": "진입 시 설정한 무효화 조건" },
-          "invalidation_hit": { "type": "boolean" },
-          "stop_price": { "type": "integer" },
-          "target_price": { "type": "integer" },
-          "max_hold_days": { "type": "integer" },
-          "indicators": { "$ref": "#/$defs/indicators" }
+          "high_since_entry": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "weight_pct": {
+            "type": "number",
+            "description": "총자산 대비 비중"
+          },
+          "held_days": {
+            "type": "integer"
+          },
+          "entry_decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "이 포지션을 만든 결정의 id"
+          },
+          "entry_thesis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "진입 당시 근거. 이게 아직 유효한지가 보유 판단의 핵심."
+          },
+          "invalidation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "진입 시 설정한 무효화 조건"
+          },
+          "invalidation_hit": {
+            "type": "boolean"
+          },
+          "stop_price": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_price": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_hold_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "indicators": {
+            "$ref": "#/$defs/indicators"
+          }
         }
       }
     },
@@ -101,36 +271,218 @@
       "description": "정량 스크리닝을 통과한 후보. AI는 이 안에서만 신규 진입을 고를 수 있다(환각 방지). 제외 사유가 있는 종목은 애초에 여기 들어오지 않는다.",
       "items": {
         "type": "object",
-        "required": ["code", "indicators", "tradable"],
+        "required": [
+          "code",
+          "indicators",
+          "tradable"
+        ],
         "additionalProperties": false,
         "properties": {
-          "code": { "$ref": "#/$defs/stockCode" },
-          "name": { "type": "string" },
-          "market": { "type": "string", "enum": ["KOSPI", "KOSDAQ"] },
-          "sector": { "type": "string" },
-          "indicators": { "$ref": "#/$defs/indicators" },
-          "flows": { "$ref": "#/$defs/stockFlows" },
+          "code": {
+            "$ref": "#/$defs/stockCode"
+          },
+          "name": {
+            "type": "string"
+          },
+          "market": {
+            "type": "string",
+            "enum": [
+              "KOSPI",
+              "KOSDAQ"
+            ]
+          },
+          "sector": {
+            "type": "string"
+          },
+          "indicators": {
+            "$ref": "#/$defs/indicators"
+          },
+          "flows": {
+            "$ref": "#/$defs/stockFlows"
+          },
           "tradable": {
             "type": "boolean",
             "description": "거래정지·관리종목·정리매매·투자위험이 아니면 true"
           },
           "screen_reasons": {
             "type": "array",
-            "description": "이 종목이 유니버스에 든 이유. 어느 정량 규칙에 걸렸는지.",
-            "items": { "type": "string" }
+            "description": "이 종목이 유니버스에 든 이유. 어느 채널(briefing/momentum/flow)로 들어왔는지 반드시 포함한다 — AI가 '수급으로 올라왔지만 브리핑 근거는 없다'를 구분할 수 있어야 한다.",
+            "items": {
+              "type": "string"
+            }
           },
           "condition_search_hits": {
             "type": "array",
             "description": "키움 조건식 실시간 편입 이력 (보조 센서)",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
+          },
+          "channels": {
+            "type": "array",
+            "description": "이 종목을 올린 채널. briefing | momentum | flow",
+            "items": {
+              "type": "string",
+              "enum": [
+                "briefing",
+                "momentum",
+                "flow"
+              ]
+            }
           }
         }
       }
     },
     "briefings": {
       "type": "array",
-      "description": "이 판단 시점에 유효한 구조화 브리핑. 최신순.",
-      "items": { "$ref": "https://raw.githubusercontent.com/SilverRain0716/AI_Ktrader/main/schemas/briefing.schema.json" }
+      "description": "이 판단 시점에 유효한 브리핑의 축약본. 최신순. 원문 섹션(sections)과 관점 원문(raw)은 넣지 않는다 — 팩이 수만 토큰으로 부풀고 AI의 주의가 분산된다. 원문이 필요하면 briefings 테이블을 별도 조회한다.",
+      "items": {
+        "type": "object",
+        "required": [
+          "briefing_id",
+          "kind",
+          "published_at",
+          "is_fresh"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "briefing_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "market": {
+            "type": "string",
+            "enum": [
+              "KR",
+              "US",
+              "GLOBAL"
+            ]
+          },
+          "is_fresh": {
+            "type": "boolean",
+            "description": "이번 사이클에 새로 반영된 브리핑인가. AI가 무엇이 새 정보인지 알아야 같은 판단을 반복하지 않는다."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parse_warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "views": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "stance"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9]{6}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "symbol": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "market": {
+                  "type": "string",
+                  "enum": [
+                    "KR",
+                    "US"
+                  ]
+                },
+                "stance": {
+                  "type": "string",
+                  "enum": [
+                    "주목",
+                    "조건부",
+                    "경계",
+                    "회피"
+                  ]
+                },
+                "stance_inherited": {
+                  "type": "boolean"
+                },
+                "confidence": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "상",
+                        "중상",
+                        "중",
+                        "중하",
+                        "하"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "catalyst": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "invalidation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "check_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kr_links": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "recent_decisions": {
       "type": "array",
@@ -139,31 +491,63 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "decision_id": { "type": "string" },
-          "code": { "$ref": "#/$defs/stockCode" },
-          "action": { "type": "string" },
-          "confidence": { "type": "string" },
-          "outcome_pct": { "type": ["number", "null"] },
-          "note": { "type": "string" }
+          "decision_id": {
+            "type": "string"
+          },
+          "code": {
+            "$ref": "#/$defs/stockCode"
+          },
+          "action": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "string"
+          },
+          "outcome_pct": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "note": {
+            "type": "string"
+          }
         }
       }
     },
     "constraints": {
       "type": "object",
       "description": "AI가 반드시 지켜야 하는 한도. 실행 계층이 동일한 값으로 재검증한다.",
-      "required": ["max_positions", "max_weight_pct_per_name", "max_risk_pct_per_trade", "daily_loss_limit_krw"],
+      "required": [
+        "max_positions",
+        "max_weight_pct_per_name",
+        "max_risk_pct_per_trade",
+        "daily_loss_limit_krw"
+      ],
       "additionalProperties": false,
       "properties": {
-        "max_positions": { "type": "integer" },
-        "max_new_entries_this_cycle": { "type": "integer" },
-        "max_weight_pct_per_name": { "type": "number" },
-        "max_weight_pct_per_sector": { "type": "number" },
+        "max_positions": {
+          "type": "integer"
+        },
+        "max_new_entries_this_cycle": {
+          "type": "integer"
+        },
+        "max_weight_pct_per_name": {
+          "type": "number"
+        },
+        "max_weight_pct_per_sector": {
+          "type": "number"
+        },
         "max_risk_pct_per_trade": {
           "type": "number",
           "description": "1회 최대 손실(계좌 대비 %). 포지션 크기 = (총자산 × 이 값) ÷ 손절폭"
         },
-        "daily_loss_limit_krw": { "type": "integer" },
-        "daily_loss_limit_hit": { "type": "boolean" },
+        "daily_loss_limit_krw": {
+          "type": "integer"
+        },
+        "daily_loss_limit_hit": {
+          "type": "boolean"
+        },
         "max_order_vs_adv_pct": {
           "type": "number",
           "description": "주문금액 / 20일 평균 거래대금 상한(%). 슬리피지 방어."
@@ -171,7 +555,9 @@
         "blocked_codes": {
           "type": "array",
           "description": "당일 손절 등으로 재진입이 금지된 종목",
-          "items": { "$ref": "#/$defs/stockCode" }
+          "items": {
+            "$ref": "#/$defs/stockCode"
+          }
         }
       }
     },
@@ -180,22 +566,56 @@
       "description": "입력 데이터의 신뢰도. 결손이 크면 AI는 abstain해야 한다.",
       "additionalProperties": false,
       "properties": {
-        "ohlcv_as_of": { "type": "string", "format": "date" },
-        "flows_as_of": { "type": "string", "format": "date" },
-        "missing_briefings": { "type": "array", "items": { "type": "string" } },
-        "warnings": { "type": "array", "items": { "type": "string" } }
+        "ohlcv_as_of": {
+          "type": "string",
+          "format": "date"
+        },
+        "flows_as_of": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "수급 데이터 최신일. 아직 한 번도 적재하지 않았으면 null이며 warnings에 기록된다."
+        },
+        "missing_briefings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   },
   "$defs": {
-    "stockCode": { "type": "string", "pattern": "^[0-9]{6}$" },
+    "stockCode": {
+      "type": "string",
+      "pattern": "^[0-9]{6}$"
+    },
     "indexState": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "value": { "type": "number" },
-        "change_pct": { "type": "number" },
-        "ma20_pct": { "type": "number", "description": "20일선 대비 이격도" }
+        "value": {
+          "type": "number"
+        },
+        "change_pct": {
+          "type": "number"
+        },
+        "ma20_pct": {
+          "type": "number",
+          "description": "20일선 대비 이격도"
+        }
       }
     },
     "indicators": {
@@ -203,35 +623,157 @@
       "description": "데이터 계층이 계산한 정량 지표. 확인 불가한 값은 null로 두고 임의로 채우지 않는다.",
       "additionalProperties": false,
       "properties": {
-        "close": { "type": ["integer", "null"] },
-        "change_pct": { "type": ["number", "null"] },
-        "ma5": { "type": ["number", "null"] },
-        "ma20": { "type": ["number", "null"] },
-        "ma60": { "type": ["number", "null"] },
-        "ma_aligned": { "type": ["boolean", "null"], "description": "5 > 20 > 60 정배열" },
-        "disparity20_pct": { "type": ["number", "null"] },
-        "rsi14": { "type": ["number", "null"] },
-        "macd_hist": { "type": ["number", "null"] },
-        "atr14": { "type": ["number", "null"] },
-        "atr_pct": { "type": ["number", "null"], "description": "ATR ÷ 종가. 손절폭·포지션 크기의 근거." },
-        "rs20": { "type": ["number", "null"], "description": "종목 20일 수익률 − 지수 20일 수익률" },
-        "high_52w_gap_pct": { "type": ["number", "null"] },
-        "adv20_bil_krw": { "type": ["number", "null"], "description": "20일 평균 거래대금(억원)" },
-        "volume_ratio": { "type": ["number", "null"], "description": "당일 거래량 ÷ 20일 평균" },
-        "market_cap_bil_krw": { "type": ["number", "null"] }
+        "close": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "change_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ma5": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ma20": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ma60": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ma_aligned": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "5 > 20 > 60 정배열"
+        },
+        "disparity20_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rsi14": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "macd_hist": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "atr14": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "atr_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "ATR ÷ 종가. 손절폭·포지션 크기의 근거."
+        },
+        "rs20": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "종목 20일 수익률 − 지수 20일 수익률"
+        },
+        "high_52w_gap_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "adv20_bil_krw": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "20일 평균 거래대금(억원)"
+        },
+        "volume_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "당일 거래량 ÷ 20일 평균"
+        },
+        "market_cap_bil_krw": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
       }
     },
     "stockFlows": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "foreign_net_days": { "type": ["integer", "null"], "description": "외국인 연속 순매수 일수" },
-        "foreign_net_5d_bil_krw": { "type": ["number", "null"] },
-        "inst_net_days": { "type": ["integer", "null"] },
-        "inst_net_5d_bil_krw": { "type": ["number", "null"] },
-        "foreign_hold_pct": { "type": ["number", "null"] },
-        "short_ratio_pct": { "type": ["number", "null"] },
-        "as_of": { "type": ["string", "null"], "format": "date" }
+        "foreign_net_days": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "외국인 연속 순매수 일수"
+        },
+        "foreign_net_5d_bil_krw": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inst_net_days": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "inst_net_5d_bil_krw": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "foreign_hold_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "short_ratio_pct": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "as_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        }
       }
     }
   }
