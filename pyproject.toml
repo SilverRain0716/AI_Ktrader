@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ai-trader"
 version = "0.0.1"
@@ -15,6 +19,10 @@ dependencies = [
     "python-dotenv>=1.0",
     "tenacity>=9.0",
 ]
+
+[tool.setuptools]
+# 최상위에 docs·schemas·scripts 가 함께 있어 자동 탐색이 실패한다. 실제 패키지만 명시한다.
+packages = ["briefing", "data", "data.sources", "decision"]
 
 [project.optional-dependencies]
 dev = [
