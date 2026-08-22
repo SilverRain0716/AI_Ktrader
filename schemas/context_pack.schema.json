@@ -635,6 +635,18 @@
               "maximum": 1
             }
           }
+        },
+        "disclosures_since": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9]{8}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "공시를 적재하기 시작한 날짜(YYYYMMDD). 상장폐지·불성실공시 종목의 유니버스 배제는 기간 제한이 없으므로, 배제 집합의 크기가 이 날짜에 달려 있다. null이면 공시 필터가 비활성이다."
         }
       }
     }
