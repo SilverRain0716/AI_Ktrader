@@ -17,7 +17,6 @@ dependencies = [
     "jsonschema>=4.23",
     "pydantic>=2.9",
     "python-dotenv>=1.0",
-    "tenacity>=9.0",
 ]
 
 [tool.setuptools]
@@ -32,9 +31,9 @@ dev = [
     "mypy>=1.13",
     "pre-commit>=4.0",
 ]
+# DART 는 httpx 로 직접 호출한다(dart-fss 미사용). FDR 은 종목 마스터·상장폐지 이력에 쓴다.
 data = [
     "finance-datareader>=0.9.202",
-    "dart-fss>=0.4.17",
 ]
 
 [tool.ruff]

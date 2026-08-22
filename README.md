@@ -4,8 +4,10 @@
 
 일일 증시 브리핑과 정량 지표를 하나의 컨텍스트로 모아 **AI가 매수·보유·매도를 종합 판단**하고, 실행 계층이 검증·리스크 한도를 강제한 뒤 키움 REST API로 주문을 집행한다.
 
-> **현재 단계: Phase 0 검증 + Phase 1 데이터 계층**
-> 데이터 계층이 동작한다 (일봉·수급·지표). 키움 REST 실측은 `docs/phase0-verification.md` 참조.
+> **현재 단계: Phase 3 백테스트 엔진 직전 / Phase 4 AI 판단 엔진 준비**
+> 데이터·브리핑·컨텍스트 팩 계층이 실데이터로 동작한다.
+> 유니버스 모집단 637종목 커버리지 100%, 공시 필터 활성, 브리핑 관점 208건.
+> 키움 REST 실측은 `docs/phase0-verification.md` 참조.
 
 ---
 
@@ -63,10 +65,10 @@ K-Trader는 **설계 원칙의 참고 자산**으로 쓴다. 무엇을 계승하
 |---|---|---|
 | 0 | 키움 REST 앱키 발급, 조건식·유량 제약 실측 | ⏳ 진행 |
 | 1 | 데이터 계층 — 일봉·수급 적재 + 지표 계산 | ✅ 1차 완료 |
-| 1b | DART 공시 적재, 분봉 일일 적재(키움 REST 필요) | |
-| 2 | 브리핑 구조화 — 기존 아카이브 파싱 → JSON | |
+| 1b | DART 공시 적재, 분봉 일일 적재(키움 REST 필요) | ✅ 공시 완료 / 분봉 대기 |
+| 2 | 브리핑 구조화 — 기존 아카이브 파싱 → JSON | ✅ 완료 |
 | 3 | 백테스트 엔진 — 갭·슬리피지·거래세·거래정지 반영, walk-forward | |
-| 4 | AI 판단 엔진 — 컨텍스트 팩 + 출력 스키마 + 페이퍼 실행 | |
+| 4 | AI 판단 엔진 — 컨텍스트 팩 + 출력 스키마 + 페이퍼 실행 | 🔸 컨텍스트 팩·출력 스키마 완료 / 판단 엔진 대기 |
 | 5 | **페이퍼 forward test — 최소 2~3개월** | |
 | 6 | 실행 계층 + 검증 게이트 + 모의투자 주문 | |
 | 7 | 소액 실계좌 → 한도 상향 → 완전 자동 | |
@@ -81,18 +83,35 @@ K-Trader는 **설계 원칙의 참고 자산**으로 쓴다. 무엇을 계승하
 pip install -e ".[dev,data]"
 
 python -m data.pipeline listing            # 종목 마스터 + 상장폐지 이력
-python -m data.pipeline ohlcv --limit 300  # 일봉 (시총 상위 300)
-python -m data.pipeline flows --limit 300  # 기관·외국인 수급
+python -m data.pipeline ohlcv              # 일봉 (시총 하한 이상 전 종목)
+python -m data.pipeline flows              # 기관·외국인 수급
+python -m data.pipeline disclosures        # DART 공시 (--days N)
 python -m data.pipeline indicators         # 지표 계산
 python -m data.pipeline status             # 적재 현황
 
-python -m data.pipeline daily --limit 300  # 운영 배치 (KST 18:30 이후)
+python -m data.pipeline daily              # 운영 배치 (KST 18:30 이후)
 ```
 
 DB는 `data/warehouse/market.db` (gitignore). `AIK_DATA_DIR`로 위치를 바꿀 수 있다.
 
+적재 대상은 **개수가 아니라 시총 하한**으로 정한다(`INGEST_MIN_MARKET_CAP_BIL_KRW`).
+`--limit` 는 시험용이며, 쓰면 유니버스 모집단에 구멍이 생긴다.
+`status` 가 모집단 대비 커버리지를 표시하고, 95% 미만이면 컨텍스트 팩이 경고를,
+70% 미만이면 팩 생성을 거부한다.
+
 계산되는 지표는 `schemas/context_pack.schema.json`의 `$defs.indicators` / `$defs.stockFlows`와
 키가 1:1로 대응한다. 지표를 추가할 때는 **스키마를 먼저 고친다.**
+
+### 브리핑·판단 계층
+
+```bash
+python -m briefing.pipeline sync        # GitLab 아카이브 → 구조화 (reparse 자동 실행)
+python -m briefing.pipeline map-codes   # 종목명 → 6자리 코드
+python -m briefing.pipeline reparse     # 파서 규칙 변경 후 기존 관점 재판정
+
+python -m decision.pipeline build --cycle premarket   # 컨텍스트 팩 생성
+python -m decision.pipeline status
+```
 
 테스트: `pytest` (네트워크 테스트는 `pytest -m net -o addopts=""`)
 
@@ -104,6 +123,7 @@ DB는 `data/warehouse/market.db` (gitignore). `AIK_DATA_DIR`로 위치를 바꿀
 - [조사: 데이터 소스](docs/research/data-sources.md)
 - [조사: K-Trader 코드 리뷰](docs/research/ktrader-code-review.md)
 - [첫 실제 적재에서 드러난 것](docs/02-first-real-run.md) — 버그 3건·설계 오류 2건
+- [컨텍스트 팩 설계](docs/01-context-pack-design.md) — 11장에 점검에서 드러난 결함과 조치가 누적된다
 - [ADR](docs/adr/) — 왜 그렇게 결정했는가
 
 ---
