@@ -129,6 +129,31 @@ def _seed_stock(
     _seed_ohlcv(conn, code)
 
 
+def _seed_listing_only(conn, code, name, *, cap=10000.0, managed=False, is_pref=0):
+    """모집단에는 들어가지만 일봉·지표가 없는 종목. 적재가 잘렸을 때의 모습이다."""
+    conn.execute(
+        "INSERT OR REPLACE INTO listing (code,name,market,sector,sector_group,industry,dept,"
+        "is_managed,listing_date,market_cap,shares,is_preferred,is_spac,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            code,
+            name,
+            "KOSPI",
+            "기타",
+            "기타",
+            None,
+            None,
+            int(managed),
+            None,
+            cap * 1e8,
+            None,
+            is_pref,
+            0,
+            "seed",
+        ),
+    )
+
+
 def _seed_index(conn):
     for sym in ("KOSPI", "KOSDAQ"):
         _seed_ohlcv(conn, sym, close=3000)
@@ -394,7 +419,18 @@ def test_일봉이_낡으면_거부(db):
 
 
 def test_유니버스가_비면_거부(db):
+    """지표가 없어도 하드 필터는 통과 종목 0을 조용히 반환한다. 거부는 그 앞에서 난다."""
     db.execute("DELETE FROM indicators")
+    with pytest.raises(pack.PackRefused, match="커버리지"):
+        pack.build(db, cycle="premarket", generated_at=NOW)
+
+
+def test_커버리지는_멀쩡한데_필터가_전부_잘라내면_유니버스로_거부(db):
+    """데이터는 다 있는데 임계값이 높아 아무도 못 통과하는 경우. 커버리지 문제와 구분한다."""
+    db.execute(
+        "UPDATE indicators SET payload = replace(payload, '\"adv20_bil_krw\": 200.0', "
+        "'\"adv20_bil_krw\": 1.0')"
+    )
     with pytest.raises(pack.PackRefused, match="유니버스"):
         pack.build(db, cycle="premarket", generated_at=NOW)
 
@@ -441,3 +477,92 @@ def test_event_사이클은_트리거를_담는다(db):
 def test_토큰_추정(db):
     p = pack.build(db, cycle="premarket", generated_at=NOW)
     assert 0 < pack.estimate_tokens(p) < config.MAX_PACK_TOKENS
+
+
+# ── 유니버스 커버리지 (점검 2026-08-22 결함 2·4) ─────────
+# 하드 필터 통과 종목 수는 절단된 모수 위에서 세면 멀쩡해 보인다.
+# 실제로 후보 637종목 중 314종목만 적재된 상태에서 205를 세고 통과했다.
+
+
+def test_적재_하한과_하드필터_시총_하한이_일치한다():
+    """어긋나면 조용히 구멍이 생긴다. 낮으면 모집단 결손, 높으면 적재 낭비.
+    이 등식이 커버리지 지표가 의미를 갖는 유일한 근거다."""
+    assert dcfg.INGEST_MIN_MARKET_CAP_BIL_KRW == config.MIN_MARKET_CAP_BIL_KRW
+    assert dcfg.INGEST_MIN_MARKET_CAP_KRW == config.MIN_MARKET_CAP_BIL_KRW * 1e8
+
+
+def test_지표없는_종목도_모집단에는_들어간다(db):
+    """이걸 세지 않으면 '적재된 것 중 상위'를 '시장 상위'로 착각한다."""
+    exp0, cov0 = store.universe_coverage(db, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    _seed_listing_only(db, "900100", "미적재대형주")
+    exp1, cov1 = store.universe_coverage(db, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    assert exp1 == exp0 + 1, "모집단에는 잡혀야 한다"
+    assert cov1 == cov0, "지표가 없으니 커버리지에는 안 잡혀야 한다"
+
+
+def test_전_기간_거래정지는_모집단에서_빠진다(db):
+    """유효봉 0이면 지표를 만들 방법이 없다. 모집단에 남기면 커버리지가 영원히 100%에 못 미치고,
+    그 미달분이 무슨 뜻인지 아무도 기억하지 못하게 된다 — 이 결함의 정체가 그것이었다."""
+    exp0, cov0 = store.universe_coverage(db, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    _seed_listing_only(db, "900120", "전기간정지")
+    _seed_ohlcv(db, "900120", halted_recent=True)
+    db.execute("UPDATE ohlcv SET halted=1 WHERE code='900120'")
+    exp1, cov1 = store.universe_coverage(db, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    assert exp1 == exp0, "거래정지 종목은 모집단 밖이어야 한다"
+    assert cov1 == cov0
+
+
+def test_모집단에서_관리종목_우선주_소형주_상폐는_빠진다(db):
+    """애초에 후보가 될 수 없는 종목을 모수에 넣으면 커버리지가 영원히 100%가 안 된다."""
+    exp0, _ = store.universe_coverage(db, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    _seed_listing_only(db, "900101", "관리종목", managed=True)
+    _seed_listing_only(db, "900102", "우선주", is_pref=1)
+    _seed_listing_only(db, "900103", "소형주", cap=500.0)
+    _seed_listing_only(db, "900104", "상폐예정")
+    db.execute(
+        "INSERT OR REPLACE INTO delisting (code,name,market,delisting_date,reason) "
+        "VALUES (?,?,?,?,?)",
+        ("900104", "상폐예정", "KOSPI", AS_OF.isoformat(), "테스트"),
+    )
+    exp1, _ = store.universe_coverage(db, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    assert exp1 == exp0, "넷 다 모집단 밖이어야 한다"
+
+
+def test_팩에_커버리지가_실린다(db):
+    """AI가 자기 시야가 얼마나 좁은지 알아야 abstain 판단을 할 수 있다."""
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    cov = p["data_quality"]["universe_coverage"]
+    assert cov["expected"] == cov["covered"]
+    assert cov["pct"] == 1.0
+
+
+def test_커버리지가_경고선_아래면_경고를_남긴다(db):
+    _seed_listing_only(db, "900110", "미적재1")
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    cov = p["data_quality"]["universe_coverage"]
+    assert cov["pct"] < config.UNIVERSE_COVERAGE_WARN
+    assert cov["pct"] >= config.UNIVERSE_COVERAGE_REFUSE
+    assert any("커버리지" in w for w in p["data_quality"]["warnings"])
+
+
+def test_커버리지가_하한_아래면_팩을_거부한다(db):
+    """이 검사가 없어서 49% 상태로 유니버스를 뽑고 있었다."""
+    for n in range(4):
+        _seed_listing_only(db, f"9002{n:02d}", f"미적재{n}")
+    with pytest.raises(pack.PackRefused, match="커버리지"):
+        pack.build(db, cycle="premarket", generated_at=NOW)
+
+
+def test_커버리지_거부는_유니버스_구축보다_먼저_난다(db):
+    """모수가 깨졌으면 스크리닝 결과 전체가 무의미하다. 낡은 일봉과 같은 취급이다."""
+    for n in range(4):
+        _seed_listing_only(db, f"9003{n:02d}", f"미적재{n}")
+    calls = []
+    orig = universe.build
+    universe.build = lambda *a, **k: calls.append(1) or orig(*a, **k)
+    try:
+        with pytest.raises(pack.PackRefused, match="커버리지"):
+            pack.build(db, cycle="premarket", generated_at=NOW)
+    finally:
+        universe.build = orig
+    assert not calls, "커버리지가 깨졌는데 유니버스를 만들었다"
