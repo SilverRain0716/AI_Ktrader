@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -264,12 +264,28 @@ def _migrate_v6(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_disq ON disclosures(disqualifying, code)")
 
 
+def _migrate_v7(conn):
+    """업종 대분류를 다시 매긴다.
+
+    분류 규칙이 넓어졌는데 이미 적재된 행을 그대로 두면 같은 DB 안에서 기준이 두 개가 된다.
+    industry 원문은 이미 있으므로 재적재 없이 되돌릴 수 있다.
+    """
+    from data.sources.listing import sector_group
+
+    rows = conn.execute("SELECT code, industry FROM listing").fetchall()
+    conn.executemany(
+        "UPDATE listing SET sector_group=? WHERE code=?",
+        [(sector_group(ind), code) for code, ind in rows],
+    )
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
     4: "",  # paper_positions·context_packs 추가 — _SCHEMA 재실행으로 충분
     5: _migrate_v5,  # listing 컬럼 추가
     6: _migrate_v6,  # disclosures.disqualifying·resolving 추가 + 기존 행 재판정
+    7: _migrate_v7,  # 업종 대분류 규칙 확장 → 기존 행 재분류
 }
 
 
