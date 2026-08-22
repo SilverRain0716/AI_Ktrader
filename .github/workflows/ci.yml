@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks 는 PR 커밋 범위를 git log 로 훑는다. 기본 depth 1 이면
+          # 그 범위가 로컬에 없어 "unknown revision" 으로 죽고, 스캔이 0바이트로 끝난다.
+          # 즉 depth 를 주지 않으면 시크릿 스캔은 PR에서 아예 동작하지 않는다.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
