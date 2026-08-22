@@ -116,9 +116,21 @@ def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
           AND l.code NOT IN (
               SELECT DISTINCT code FROM ohlcv WHERE halted = 1 AND date >= ?
           )
+          -- 배제는 기간 제한 없이 영구다(사용자 확정 정책). 되돌아올 길이 없으므로
+          -- 카테고리가 아니라 dart.is_disqualifying() 이 방향까지 본 판정을 쓴다 —
+          -- `불성실공시법인미지정`, `상장적격성 실질심사 대상 제외 결정` 처럼
+          -- 같은 카테고리 안에 해소 공시가 섞여 있어 오탐 한 건이 종목을 영원히 배제한다.
+          -- 영구라도 해소 공시(대상 제외 결정·법인 미지정)가 더 나중이면 배제를 푼다.
+          -- 그러지 않으면 이미 정상화된 종목이 과거 한 건 때문에 영원히 빠진다.
+          -- 배제 집합의 크기는 공시를 언제부터 적재했는가에 달려 있다.
+          -- 그 시작일은 data_quality.disclosures_since 로 팩에 실린다.
           AND l.code NOT IN (
-              SELECT DISTINCT code FROM disclosures
-              WHERE code IS NOT NULL AND category IN ('상장폐지', '불성실공시')
+              SELECT d.code FROM disclosures d
+              WHERE d.code IS NOT NULL AND d.disqualifying = 1
+              GROUP BY d.code
+              HAVING MAX(d.rcept_dt) > COALESCE(
+                  (SELECT MAX(r.rcept_dt) FROM disclosures r
+                   WHERE r.code = d.code AND r.resolving = 1), '')
           )
         """,
         (halt_since,),

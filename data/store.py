@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS disclosures (
     report_nm TEXT NOT NULL,
     category  TEXT NOT NULL,          -- schemas/briefing.schema.json 의 enum과 일치
     material  INTEGER NOT NULL,       -- 노이즈 필터 통과 여부
+    disqualifying INTEGER NOT NULL DEFAULT 0,  -- 유니버스 영구 배제 사유인가 (방향까지 본 판정)
+    resolving     INTEGER NOT NULL DEFAULT 0,  -- 배제 사유를 푸는 공시인가
     filer     TEXT,
     remark    TEXT,
     url       TEXT NOT NULL
@@ -240,11 +242,34 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
 # 전진 마이그레이션. 키는 "도달할 버전", 값은 그 버전으로 올리는 작업.
 # _SCHEMA 는 전부 IF NOT EXISTS 라 새 테이블 추가는 재실행만으로 반영된다.
 # ALTER 가 필요한 변경만 여기에 함수로 적는다.
+def _migrate_v6(conn):
+    """공시에 '배제 사유인가' 판정을 붙인다.
+
+    카테고리만으로 배제하면 `불성실공시법인미지정` 같은 해소 공시가 악재로 뒤집힌다.
+    이미 적재된 행도 다시 판정한다 — 판정 규칙이 바뀌었는데 옛 행을 그대로 두면
+    같은 DB 안에서 기준이 두 개가 된다.
+    """
+    from data.sources import dart
+
+    _add_column_if_missing(conn, "disclosures", "disqualifying", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "disclosures", "resolving", "INTEGER NOT NULL DEFAULT 0")
+    rows = conn.execute("SELECT rcept_no, report_nm, category FROM disclosures").fetchall()
+    conn.executemany(
+        "UPDATE disclosures SET disqualifying=?, resolving=? WHERE rcept_no=?",
+        [
+            (int(dart.is_disqualifying(nm, cat)), int(dart.is_resolving(nm, cat)), no)
+            for no, nm, cat in rows
+        ],
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_disc_disq ON disclosures(disqualifying, code)")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
     4: "",  # paper_positions·context_packs 추가 — _SCHEMA 재실행으로 충분
     5: _migrate_v5,  # listing 컬럼 추가
+    6: _migrate_v6,  # disclosures.disqualifying·resolving 추가 + 기존 행 재판정
 }
 
 
@@ -432,6 +457,8 @@ def upsert_disclosures(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             r.report_nm,
             r.category,
             int(bool(r.material)),
+            int(bool(getattr(r, "disqualifying", False))),
+            int(bool(getattr(r, "resolving", False))),
             r.filer,
             r.remark,
             r.url,
@@ -441,11 +468,13 @@ def upsert_disclosures(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     conn.executemany(
         """INSERT INTO disclosures
            (rcept_no,rcept_dt,corp_code,code,corp_name,corp_cls,
-            report_nm,category,material,filer,remark,url)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            report_nm,category,material,disqualifying,resolving,filer,remark,url)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(rcept_no) DO UPDATE SET
              report_nm=excluded.report_nm, category=excluded.category,
-             material=excluded.material, remark=excluded.remark""",
+             material=excluded.material, disqualifying=excluded.disqualifying,
+             resolving=excluded.resolving,
+             remark=excluded.remark""",
         rows,
     )
     return len(rows)
@@ -676,6 +705,17 @@ def universe_coverage(conn: sqlite3.Connection, *, min_market_cap: float) -> tup
         (min_market_cap,),
     ).fetchone()[0]
     return expected, covered
+
+
+def disclosure_span(conn: sqlite3.Connection) -> tuple[str | None, str | None]:
+    """공시를 언제부터 언제까지 적재했는가 (YYYYMMDD).
+
+    악재공시 배제가 **영구**이므로, 배제 집합의 크기는 이 구간 길이에 정비례한다.
+    구간을 밝히지 않으면 "이 종목은 왜 유니버스에 없나"에 답할 수 없고,
+    적재를 늘릴 때마다 유니버스가 조용히 줄어든다.
+    """
+    row = conn.execute("SELECT MIN(rcept_dt), MAX(rcept_dt) FROM disclosures").fetchone()
+    return (row[0], row[1]) if row else (None, None)
 
 
 def delisted_codes(conn: sqlite3.Connection) -> set[str]:

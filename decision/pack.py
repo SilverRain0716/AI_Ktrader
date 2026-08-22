@@ -220,6 +220,12 @@ def _data_quality(
             f"종목코드 매핑 실패 관점 {unmapped}건 — 유니버스 브리핑 채널에 반영되지 않았다"
         )
 
+    disc_since, _ = store.disclosure_span(conn)
+    if not disc_since:
+        warnings.append(
+            "공시 데이터 없음 — 상장폐지·불성실공시 종목이 유니버스에서 걸러지지 않는다"
+        )
+
     if coverage["pct"] < config.UNIVERSE_COVERAGE_WARN:
         warnings.append(
             f"유니버스 커버리지 {coverage['pct']:.0%} "
@@ -232,6 +238,7 @@ def _data_quality(
         "flows_as_of": flows_as_of,
         "missing_briefings": missing,
         "universe_coverage": coverage,
+        "disclosures_since": disc_since,
         "warnings": warnings,
     }
 

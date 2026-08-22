@@ -263,12 +263,97 @@ def test_하드필터_유효봉_부족_제외(db):
     assert "900005" not in universe.hard_filter(db, AS_OF)
 
 
-def test_하드필터_악재공시_제외(db):
-    db.execute(
-        "INSERT INTO disclosures (rcept_no,rcept_dt,corp_code,code,report_nm,category,material,url)"
-        " VALUES ('1','20260820','c','000660','상장폐지결정','상장폐지',1,'u')"
+def _seed_disclosure(conn, rcept_no, code, report_nm, day, category=None):
+    """실제 적재 경로와 같은 판정을 태운다. 판정을 테스트가 손으로 쓰면
+    분류가 틀려도 테스트는 통과한다 — 검증하려던 것이 빠져나간다."""
+    from data.sources import dart
+
+    category = category or dart.classify(report_nm)
+    conn.execute(
+        "INSERT OR REPLACE INTO disclosures "
+        "(rcept_no,rcept_dt,corp_code,code,report_nm,category,material,"
+        " disqualifying,resolving,url) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            rcept_no,
+            day,
+            "c",
+            code,
+            report_nm,
+            category,
+            int(dart.is_material(category)),
+            int(dart.is_disqualifying(report_nm, category)),
+            int(dart.is_resolving(report_nm, category)),
+            "u",
+        ),
     )
+
+
+def test_하드필터_악재공시_제외(db):
+    _seed_disclosure(db, "1", "000660", "주권매매거래정지 (상장폐지 사유발생)", "20260820")
     assert "000660" not in universe.hard_filter(db, AS_OF)
+
+
+def test_해소_공시는_배제하지_않는다(db):
+    """`불성실공시법인미지정`은 지정하지 않았다는 뜻이다. 카테고리만 보면 악재로 뒤집힌다.
+    배제가 영구이므로 오탐 한 건이 종목을 영원히 배제한다."""
+    _seed_disclosure(db, "1", "000660", "불성실공시법인미지정 (지정유예)", "20260820")
+    assert "000660" in universe.hard_filter(db, AS_OF)
+
+
+def test_예고와_기한안내는_아직_확정이_아니다(db):
+    for i, nm in enumerate(
+        (
+            "불성실공시법인지정예고 (공시번복)",
+            "기타시장안내 (상장적격성 실질심사 대상결정 기한 안내)",
+            "기타시장안내 (정기보고서 미제출 관련 상장폐지 절차 미진행)",
+        )
+    ):
+        db.execute("DELETE FROM disclosures")
+        _seed_disclosure(db, str(i), "000660", nm, "20260820")
+        assert "000660" in universe.hard_filter(db, AS_OF), nm
+
+
+def test_나중에_해소되면_배제가_풀린다(db):
+    """실측 사례: 덱스터는 상장적격성 실질심사 대상에서 제외되고 거래정지도 풀렸다.
+    영구 배제가 '해소 공시를 무시한다'는 뜻이 되면 정책이 아니라 버그다."""
+    _seed_disclosure(db, "1", "000660", "기타시장안내 (상장적격성 실질심사 사유 발생)", "20260701")
+    assert "000660" not in universe.hard_filter(db, AS_OF)
+
+    _seed_disclosure(
+        db, "2", "000660", "기타시장안내 (상장적격성 실질심사 대상 제외 결정)", "20260810"
+    )
+    assert "000660" in universe.hard_filter(db, AS_OF)
+
+
+def test_해소_뒤_사유가_다시_생기면_다시_배제된다(db):
+    _seed_disclosure(db, "1", "000660", "기타시장안내 (상장적격성 실질심사 사유 발생)", "20260701")
+    _seed_disclosure(
+        db, "2", "000660", "기타시장안내 (상장적격성 실질심사 대상 제외 결정)", "20260710"
+    )
+    assert "000660" in universe.hard_filter(db, AS_OF)
+
+    _seed_disclosure(db, "3", "000660", "주권매매거래정지 (상장폐지 사유발생)", "20260815")
+    assert "000660" not in universe.hard_filter(db, AS_OF)
+
+
+def test_배제는_기간_제한이_없다(db):
+    """확정 정책: 시간이 지나도 풀리지 않는다. 푸는 것은 해소 공시뿐이다."""
+    _seed_disclosure(db, "1", "000660", "불성실공시법인지정 (공시불이행)", "20200102")
+    assert "000660" not in universe.hard_filter(db, AS_OF)
+
+
+def test_공시가_없으면_팩에_경고가_남는다(db):
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert p["data_quality"]["disclosures_since"] is None
+    assert any("공시 데이터 없음" in w for w in p["data_quality"]["warnings"])
+
+
+def test_팩에_공시_적재_시작일이_실린다(db):
+    """배제가 영구이므로 배제 집합의 크기가 이 날짜에 달려 있다. 밝히지 않으면
+    '이 종목은 왜 유니버스에 없나'에 답할 수 없다."""
+    _seed_disclosure(db, "1", "051910", "단일판매ㆍ공급계약체결", "20260601")
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert p["data_quality"]["disclosures_since"] == "20260601"
 
 
 # ── 3채널 ───────────────────────────────────────────────
