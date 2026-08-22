@@ -282,3 +282,213 @@ def test_라벨_없이_헤더에_붙은_관점(line, stance, conf):
 def test_복기_문장을_관점으로_오인하지_않는다():
     """'SK하이닉스 주목(중상) → +12.73%' 는 복기이지 새 관점이 아니다."""
     assert parser.parse_stance("1. SK하이닉스 주목(중상) → +12.73%. 관점 적중") is None
+
+
+# ── 라벨 없는 서술문 근거 (점검 2026-08-22 결함 6) ───────
+# kr-preclose·us-premarket 은 `근거:` 라벨을 쓰지 않고 종목명 뒤 서술문에 근거를 담는다.
+# 라벨만 보면 관점의 40%가 규칙 미달로 집계되는데, 파서가 그 줄을 안 읽었을 뿐이었다.
+# 아래 헤더는 전부 실제 브리핑에서 그대로 가져왔다.
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        # '+' 가 접속사이면서 등락률 부호이기도 하다. 뒤에 숫자가 오면 자르지 않는다.
+        (
+            "1. SK하이닉스(000660) +3%대 — 40조 자사주 취득·소각 매 거래일 실매입(승계)"
+            "+간밤 SOX +0.53%·마이크론 강세.",
+            ["40조 자사주 취득·소각 매 거래일 실매입(승계)", "간밤 SOX +0.53%·마이크론 강세."],
+        ),
+        # 'DART 당일 공시 없음' 은 촉매의 부재를 알리는 꼬리말이지 상승 근거가 아니다.
+        (
+            "1. 알테오젠 (+15.57%) — 블랙록 지분 5.03% 확대(7/31 공시) 재부각 + "
+            "코스닥 바이오 순환매·외국인/기관 쌍끌이. DART 당일 공시 없음",
+            ["블랙록 지분 5.03% 확대(7/31 공시) 재부각", "코스닥 바이오 순환매·외국인/기관 쌍끌이"],
+        ),
+        # 자릿점 쉼표('+3,440억')는 근거 구분자가 아니다.
+        (
+            "1. 삼성전자 (+5.33%) — 코스피 외국인 순매수 급확대(오전 +440억→오후 +3,440억)에 "
+            "전기전자 견인, 애플發 메모리 원가 상승 우호 read-through 승계",
+            [
+                "코스피 외국인 순매수 급확대(오전 +440억→오후 +3,440억)에 전기전자 견인",
+                "애플發 메모리 원가 상승 우호 read-through 승계",
+            ],
+        ),
+    ],
+)
+def test_서술문에서_근거를_뽑는다(header, expected):
+    assert parser.reasons_from_narrative(header) == expected
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "2. 로켓랩(RKLB) — 프리마켓 +9.46%",
+        "3. 슈퍼마이크로(SMCI) — 프리마켓 +5.96%",
+        "1. 코어위브(CRWV) — 프리마켓 +17~18% (106달러 부근)",
+        "1. SK하이닉스(000660) +1.03%(166.2만원)",
+    ],
+)
+def test_등락률만_있으면_근거가_아니다(header):
+    """움직였다는 사실은 왜 움직였는지가 아니다.
+
+    이걸 근거로 세면 '근거 2개 이상' 경고만 사라지고 입력 품질은 그대로다 —
+    가드가 틀린 이유로 통과하는 바로 그 패턴이다."""
+    assert parser.reasons_from_narrative(header) == []
+
+
+def test_구분선이_없으면_뽑지_않는다():
+    assert parser.reasons_from_narrative("1. SK하이닉스(000660) +1.03%") == []
+
+
+def test_라벨_근거가_있으면_서술문을_쓰지_않는다():
+    """라벨이 명시돼 있으면 그것이 브리핑이 의도한 근거다. 서술문으로 덮어쓰지 않는다."""
+    text = "\n".join(
+        [
+            "## 14:50 장마감 전 점검",
+            "### 장중 리더",
+            "1. 삼성전자(005930) +3% — 서술문 근거 하나 + 서술문 근거 둘",
+            "· 근거: ① 라벨 근거 하나 ② 라벨 근거 둘 ③ 라벨 근거 셋",
+            "· 관점: 주목 / 확신도 중상",
+        ]
+    )
+    p = parser.parse("2026-08-21", "1450-kr-preclose", text)
+    assert p.views[0]["reasons"] == ["라벨 근거 하나", "라벨 근거 둘", "라벨 근거 셋"]
+
+
+def test_라벨이_없으면_서술문에서_보충한다():
+    text = "\n".join(
+        [
+            "## 14:50 장마감 전 점검",
+            "### 장중 리더",
+            "1. 삼성전자(005930) +3% — 외국인 순매수 급확대 + 반도체 업종 강세",
+            "· 관점: 주목 / 확신도 중상",
+        ]
+    )
+    p = parser.parse("2026-08-21", "1450-kr-preclose", text)
+    assert p.views[0]["reasons"] == ["외국인 순매수 급확대", "반도체 업종 강세"]
+    assert not any("근거" in w for w in p.parse_warnings), p.parse_warnings
+
+
+# ── 파생값이 낡는 문제 (점검 2026-08-22 결함 5·6) ────────
+# parse_warnings 는 파싱 시점에 기록되는데, 코드 매핑과 파서 규칙 변경은 그 뒤에 온다.
+# 걷어내지 않으면 이미 해결된 경고가 영원히 남는다 — 실측에서 '종목코드 없음' 이
+# 38건으로 집계됐지만 실제 미매핑은 2건이었다.
+
+_라벨없는_브리핑 = "\n".join(
+    [
+        "## 14:50 장마감 전 점검",
+        "### 장중 리더",
+        "1. 알테오젠 (+15.57%) — 블랙록 지분 확대 재부각 + 코스닥 바이오 순환매",
+        "· 관점: 주목 / 확신도 중상",
+        "· 틀리는 조건: 순환매가 하루로 끝나는 경우",
+    ]
+)
+
+
+def _브리핑_db(text=_라벨없는_브리핑):
+    conn = sqlite3.connect(":memory:")
+    store.init_db(conn)
+    conn.execute(
+        "INSERT INTO listing (code,name,market,is_preferred,is_spac,updated_at) "
+        "VALUES ('196170','알테오젠','KOSDAQ',0,0,'x')"
+    )
+    p = parser.parse("2026-08-21", "1450-kr-preclose", text)
+    store.upsert_briefing(
+        conn, p.to_dict(), stem="1450-kr-preclose", ingested_at="2026-08-22T00:00:00+09:00"
+    )
+    return conn
+
+
+def _경고(conn):
+    import json
+
+    return json.loads(conn.execute("SELECT parse_warnings FROM briefings").fetchone()[0])
+
+
+def test_코드가_채워지면_종목코드_경고를_걷어낸다():
+    from briefing import pipeline
+
+    conn = _브리핑_db()
+    assert any("종목코드 없음" in w for w in _경고(conn))
+
+    pipeline.task_map_codes(conn)
+
+    assert conn.execute("SELECT code FROM briefing_views").fetchone()[0] == "196170"
+    assert not any("종목코드 없음" in w for w in _경고(conn)), _경고(conn)
+
+
+def test_매핑에_실패하면_경고는_남는다():
+    """해결되지 않은 경고까지 지우면 통계가 반대로 거짓말한다."""
+    from briefing import pipeline
+
+    conn = _브리핑_db()
+    conn.execute("DELETE FROM listing")
+    pipeline.task_map_codes(conn)
+    assert any("종목코드 없음" in w for w in _경고(conn))
+
+
+def test_재판정이_근거를_보충하고_경고를_지운다():
+    from briefing import pipeline
+
+    conn = _브리핑_db()
+    # 옛 규칙(라벨만 인식)으로 적재된 상태를 만든다
+    conn.execute("UPDATE briefing_views SET reasons='[]'")
+    conn.execute(
+        "UPDATE briefings SET parse_warnings=?",
+        ('["알테오젠: 근거 0개 (브리핑 규칙은 2개 이상)"]',),
+    )
+
+    assert pipeline.task_reparse(conn) == 1
+
+    import json
+
+    assert len(json.loads(conn.execute("SELECT reasons FROM briefing_views").fetchone()[0])) == 2
+    assert _경고(conn) == []
+
+
+def test_재판정은_라벨_근거를_건드리지_않는다():
+    from briefing import pipeline
+
+    conn = _브리핑_db(
+        "\n".join(
+            [
+                "## 14:50 장마감 전 점검",
+                "### 장중 리더",
+                "1. 알테오젠 (+15.57%) — 서술문 하나 + 서술문 둘",
+                "· 근거: ① 라벨 하나 ② 라벨 둘",
+                "· 관점: 주목 / 확신도 중상",
+            ]
+        )
+    )
+    assert pipeline.task_reparse(conn) == 0
+
+    import json
+
+    assert json.loads(conn.execute("SELECT reasons FROM briefing_views").fetchone()[0]) == [
+        "라벨 하나",
+        "라벨 둘",
+    ]
+
+
+def test_근거가_여전히_부족하면_실제_개수로_다시_쓴다():
+    """경고를 지우는 게 목적이 아니라 실제 상태를 반영하는 게 목적이다."""
+    from briefing import pipeline
+
+    conn = _브리핑_db(
+        "\n".join(
+            [
+                "## 14:50 장마감 전 점검",
+                "### 장중 리더",
+                "1. 알테오젠 (+15.57%) — 코스닥 바이오 순환매",
+                "· 관점: 주목 / 확신도 중상",
+            ]
+        )
+    )
+    conn.execute("UPDATE briefing_views SET reasons='[]'")
+    conn.execute(
+        "UPDATE briefings SET parse_warnings=?",
+        ('["알테오젠: 근거 0개 (브리핑 규칙은 2개 이상)"]',),
+    )
+    pipeline.task_reparse(conn)
+    assert _경고(conn) == ["알테오젠: 근거 1개 (브리핑 규칙은 2개 이상)"]
