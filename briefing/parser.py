@@ -161,6 +161,62 @@ def split_reasons(text: str) -> list[str]:
     return [p.strip(" ·-—,") for p in parts if p.strip(" ·-—,")]
 
 
+# 헤더 서술문에서 근거를 뽑을 때 쓰는 분리자.
+# '+' 는 근거를 잇는 접속어이면서 등락률 부호이기도 하다(`간밤 SOX +0.53%`).
+# 뒤에 숫자가 오면 부호이므로 자르지 않는다. '.' 도 소수점과 문장 끝을 구분해야 한다.
+_NARRATIVE_PLUS = re.compile(r"\s*\+\s*(?=[^\d\s])")
+_NARRATIVE_STOP = re.compile(r"(?<=[^\d])\.\s+")
+
+# 근거가 아닌 꼬리말. 촉매의 부재를 알리는 문장이지 상승 근거가 아니다.
+_NOT_A_REASON = re.compile(r"^(DART\s*(당일)?\s*공시\s*없음|공시\s*없음|당일\s*공시\s*없음)[.\s]*$")
+
+# 등락률·가격만 있는 조각. 움직였다는 사실은 그 자체로 근거가 아니다.
+# 이걸 근거로 세면 경고만 사라지고 데이터 품질은 그대로다.
+_PRICE_ONLY = re.compile(
+    r"^(프리마켓|장전|장후|시간외|종가|현재가|오전|오후)?\s*"
+    r"[+\-]?\d[\d,.]*(\s*[~\-]\s*\d[\d,.]*)?\s*"
+    r"(%|원|달러|%대|만원)?\s*(\([^)]*(달러|원|부근|수준)\))?\s*$"
+)
+
+# 쉼표도 근거를 잇는다. 단 숫자 안의 자릿점('+3,440억')은 자르지 않는다.
+_NARRATIVE_COMMA = re.compile(r"(?<!\d),\s*")
+
+
+def is_substantive_reason(text: str) -> bool:
+    """근거로 셀 만한 조각인가.
+
+    없는 근거를 만들어내면 `근거 2개 이상` 경고만 사라지고 입력 품질은 그대로다.
+    '프리마켓 +9.46%' 는 종목이 움직였다는 사실일 뿐 왜 움직였는지가 아니다.
+    """
+    t = text.strip(" ·-—,")
+    if len(t) < 4:
+        return False
+    return not (_NOT_A_REASON.match(t) or _PRICE_ONLY.match(t))
+
+
+def reasons_from_narrative(header: str) -> list[str]:
+    """헤더의 '—' 뒤 서술문에서 근거를 뽑는다.
+
+    kr-preclose·us-premarket 은 `근거:` 라벨을 쓰지 않고 종목명 뒤 서술문에 근거를 담는다.
+
+        1. SK하이닉스(000660) +3%대 — 40조 자사주 취득·소각 실매입(승계)+간밤 SOX +0.53%
+
+    라벨이 없다고 근거가 없는 것이 아니다. 라벨만 보면 관점 208건 중 40%가 규칙 미달로
+    집계되는데, 실제로는 파서가 이 줄을 읽지 않았을 뿐이다 (점검 2026-08-22 결함 6).
+    """
+    parts = re.split(r"[—–]", header, maxsplit=1)
+    if len(parts) < 2:
+        return []
+    out: list[str] = []
+    for sentence in _NARRATIVE_STOP.split(parts[1]):
+        for clause in _NARRATIVE_PLUS.split(sentence):
+            for frag in _NARRATIVE_COMMA.split(clause):
+                frag = frag.strip(" ·-—,")
+                if frag and is_substantive_reason(frag):
+                    out.append(frag)
+    return out
+
+
 def parse_header(raw: str) -> dict:
     """블록 헤더에서 종목명·코드·티커를 뽑는다.
 
@@ -335,6 +391,11 @@ def _parse_block(header: str, block: list[str], market: str, warnings: list[str]
                 else:
                     view[key] = val
                 break
+
+    # 라벨이 붙은 근거가 하나도 없으면 헤더 서술문에서 뽑는다.
+    # 라벨을 안 쓰는 브리핑 종류가 있을 뿐, 근거가 없는 것이 아니다 (결함 6).
+    if not view["reasons"]:
+        view["reasons"] = reasons_from_narrative(header)
 
     # 1450 변형: '관점: … / 틀리는 조건: … / 확인: …' 이 한 줄에 붙어 온다
     if view["invalidation"] is None and (
