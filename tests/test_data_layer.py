@@ -219,3 +219,75 @@ def test_KOSDAQ_GLOBAL은_KOSDAQ으로_정규화된다():
 
     assert "KOSDAQ GLOBAL" in ls._MARKETS
     assert ls._MARKET_NORMALIZE["KOSDAQ GLOBAL"] == "KOSDAQ"
+
+
+# ── 업종 대분류 (점검 2026-08-22 결함 8) ─────────────────
+# 업종 문자열은 전부 실제 KRX-DESC 값이다. 지어낸 문자열로 테스트하면
+# 분류가 현실과 어긋나도 통과한다.
+#
+# 이 분류의 목적은 "같이 움직이는 종목에 몰리지 않는 것"(섹터 비중 한도 30%)이다.
+# '기타'가 크면 한도가 정확히 작동해야 할 곳에서 작동하지 않는다.
+
+
+@pytest.mark.parametrize(
+    "industry,group",
+    [
+        # 한국 시장에서 상관관계가 가장 높은 테마. '기타'에 있으면 한도가 무의미하다.
+        ("일차전지 및 이차전지 제조업", "2차전지"),  # LG에너지솔루션·삼성SDI·에코프로비엠
+        # '의약품'만 보면 삼성바이오로직스·셀트리온이 빠진다.
+        ("기초 의약물질 제조업", "제약·바이오"),
+        ("완제 의약품 제조업", "제약·바이오"),
+        ("기타 식품 제조업", "유통·소비재"),  # CJ제일제당·농심·오리온
+        ("담배 제조업", "유통·소비재"),  # KT&G
+        ("동·식물성 유지 및 낙농제품 제조업", "유통·소비재"),
+        ("절연선 및 케이블 제조업", "반도체·전자"),
+        ("컴퓨터 및 주변장치 제조업", "반도체·전자"),
+        ("시멘트, 석회, 플라스터 및 그 제품 제조업", "건설·부동산"),
+        ("유리 및 유리제품 제조업", "건설·부동산"),
+        ("구조용 금속제품, 탱크 및 증기발생기 제조업", "철강·금속"),
+        ("유원지 및 기타 오락관련 서비스업", "서비스·레저"),  # 강원랜드·파라다이스·GKL
+        ("여행사 및 기타 여행보조 서비스업", "서비스·레저"),
+        ("회사 본부 및 경영 컨설팅 서비스업", "지주·상사"),
+        ("상품 중개업", "지주·상사"),  # 포스코인터내셔널·LX인터내셔널
+        ("증기, 냉·온수 및 공기조절 공급업", "에너지·유틸리티"),
+        ("기타 정보 서비스업", "IT·소프트웨어"),
+        ("창작 및 예술관련 서비스업", "통신·미디어"),
+        # 기존 분류가 규칙 확장으로 흔들리지 않아야 한다
+        ("반도체 제조업", "반도체·전자"),
+        ("자동차용 엔진 및 자동차 제조업", "자동차"),
+        ("기타 화학제품 제조업", "화학"),
+        ("특수 목적용 기계 제조업", "기계·장비"),
+        ("은행 및 저축기관", "금융"),
+        ("선박 및 보트 건조업", "조선·방산·항공"),
+    ],
+)
+def test_업종_대분류(industry, group):
+    from data.sources import listing as ls
+
+    assert ls.sector_group(industry) == group
+
+
+def test_분류_불명은_기타로_남는다():
+    from data.sources import listing as ls
+
+    assert ls.sector_group("그외 기타 전문, 과학 및 기술 서비스업") == "기타"
+    assert ls.sector_group("") == "기타"
+    assert ls.sector_group(None) == "기타"
+
+
+def test_NaN_업종에도_깨지지_않는다():
+    """`if not industry` 는 NaN을 통과시켜 TypeError를 냈고, sector_group 이 전부 NULL이 됐다."""
+    import numpy as np
+
+    from data.sources import listing as ls
+
+    assert ls.sector_group(np.nan) == "기타"
+
+
+def test_분류_우선순위가_좁은_규칙_먼저다():
+    """'전지 제조'가 '기계'보다 먼저 와야 이차전지가 기계·장비로 새지 않는다."""
+    from data.sources import listing as ls
+
+    groups = [g for g, _ in ls._SECTOR_GROUPS]
+    assert groups.index("2차전지") < groups.index("기계·장비")
+    assert groups.index("제약·바이오") < groups.index("화학")

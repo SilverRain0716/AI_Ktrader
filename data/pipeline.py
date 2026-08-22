@@ -76,6 +76,7 @@ def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = Tru
     )
 
     ok = fail = 0
+    failed_targets: list[str] = []
     for i, sym in enumerate(targets, 1):
         try:
             if full:
@@ -104,6 +105,7 @@ def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = Tru
                 log.info("일봉 진행 %d/%d", i, len(targets))
         except Exception as e:
             fail += 1
+            failed_targets.append(sym)
             log.warning("일봉 실패 %s: %s", sym, e)
             store.log_ingest(
                 conn,
@@ -113,6 +115,30 @@ def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = Tru
                 status="fail",
                 detail=str(e)[:500],
             )
+
+    if failed_targets:
+        # 일시적 실패는 한 번 더 시도한다. 실제로 SK·셀트리온·현대모비스가 이렇게 실패했고,
+        # 이전 실행분이 남아 있어 드러나지 않았을 뿐이다.
+        # 그래도 남는 결손은 커버리지 가드가 잡는다 — 재시도는 가드의 대체재가 아니다.
+        log.info("일봉 재시도 %d종목", len(failed_targets))
+        for sym in list(failed_targets):
+            try:
+                df = naver.fetch_ohlcv(sym, config.default_start_for(False), config.today_kst())
+                rows = store.upsert_ohlcv(conn, sym, df)
+                store.log_ingest(
+                    conn,
+                    started_at=started,
+                    task="ohlcv",
+                    target=sym,
+                    status="ok",
+                    rows=rows,
+                    detail="재시도 성공",
+                )
+                ok += 1
+                fail -= 1
+                failed_targets.remove(sym)
+            except Exception as e:
+                log.warning("일봉 재시도 실패 %s: %s", sym, e)
 
     log.info("일봉 완료 — 성공 %d / 실패 %d", ok, fail)
     if fail and fail > len(targets) * 0.1:
