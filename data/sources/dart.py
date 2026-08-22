@@ -100,6 +100,55 @@ def default_sentiment(category: str) -> str:
     return "악재" if category in _CLEAR_NEGATIVE else "판단보류"
 
 
+# ── 유니버스 배제 판정 ───────────────────────────────────
+# 카테고리는 "주제"이지 "방향"이 아니다. `상장폐지`·`불성실공시` 로 분류된 공시 안에는
+# 오히려 **해소**를 알리는 것이 섞여 있다. 실측(2026-08 10일치)에서 확인된 것들:
+#
+#   불성실공시법인**미**지정 (지정유예)          ← 지정하지 않았다는 뜻
+#   기타시장안내 (상장적격성 실질심사 대상 제외 결정)  ← 심사 대상에서 빠졌다는 뜻
+#   주권매매거래정지**해제** (… 대상 제외 결정)      ← 정지가 풀렸다는 뜻
+#   기타시장안내 (… 대상결정 기한 안내)            ← 아직 결정이 안 났다는 뜻
+#   기타시장안내 (… 절차 **미진행**)               ← 절차를 밟지 않았다는 뜻
+#   불성실공시법인지정**예고**                     ← 확정되면 `지정` 공시가 따로 난다
+#
+# 카테고리만 보고 배제하면 이들이 전부 악재로 뒤집힌다. 제외가 **영구**이므로 오탐 한 건이
+# 종목을 영원히 배제한다 — 되돌아올 길이 없는 판정에는 방향까지 봐야 한다.
+_NOT_DISQUALIFYING = re.compile(
+    r"미지정|지정\s*유예|대상\s*제외|제외\s*결정|미진행|기한\s*안내"
+    r"|지정\s*예고|대상\s*아님|해당\s*없음|우려\s*관련\s*안내"
+)
+
+DISQUALIFYING_CATEGORIES = frozenset({"상장폐지", "불성실공시"})
+
+# 배제를 **푸는** 공시. "아직 아니다"(예고·기한 안내·미진행)와 구분한다 —
+# 저쪽은 중립이라 배제도 해제도 하지 않는다. 이쪽은 사유가 실제로 해소됐다는 확정 통지다.
+_RESOLVING = re.compile(r"대상\s*제외|제외\s*결정|법인\s*미지정|대상\s*아님|해당\s*없음")
+
+
+def is_resolving(report_nm: str, category: str) -> bool:
+    """배제 사유가 해소됐음을 알리는 공시인가.
+
+    배제가 영구라도 "해소 공시를 무시한다"는 뜻은 아니다. 실측에서 덱스터는
+    `상장적격성 실질심사 대상 제외 결정` + `주권매매거래정지해제` 로 완전히 풀렸는데,
+    과거의 사유 발생 공시 한 건만 남아 있으면 영원히 배제된다. 그건 정책이 아니라 버그다.
+    """
+    if category not in DISQUALIFYING_CATEGORIES:
+        return False
+    return bool(_RESOLVING.search(report_nm or ""))
+
+
+def is_disqualifying(report_nm: str, category: str) -> bool:
+    """유니버스에서 영구 배제할 사유인가.
+
+    `is_material`(팩에 실을 만한가)과 다르다. 이쪽은 되돌릴 수 없는 판정이므로 더 엄격하게 본다.
+    확정된 악재만 True 로 둔다 — 예고·기한 안내·미진행처럼 "아직 아니다"와,
+    미지정·대상 제외처럼 "이미 풀렸다"는 둘 다 False 다.
+    """
+    if category not in DISQUALIFYING_CATEGORIES:
+        return False
+    return not _NOT_DISQUALIFYING.search(report_nm or "")
+
+
 def is_material(category: str) -> bool:
     return category in MATERIAL_CATEGORIES
 
@@ -236,6 +285,8 @@ def _to_record(item: dict) -> dict:
         "report_nm": report_nm,
         "category": category,
         "material": is_material(category),
+        "disqualifying": is_disqualifying(report_nm, category),
+        "resolving": is_resolving(report_nm, category),
         "filer": (item.get("flr_nm") or "").strip(),
         "remark": (item.get("rm") or "").strip(),
         "url": _VIEWER_URL.format(rcept_no=(item.get("rcept_no") or "").strip()),
@@ -254,6 +305,8 @@ def _empty() -> pd.DataFrame:
             "report_nm",
             "category",
             "material",
+            "disqualifying",
+            "resolving",
             "filer",
             "remark",
             "url",
