@@ -647,6 +647,37 @@ def tradable_codes(
     return [r[0] for r in conn.execute(sql, params).fetchall()]
 
 
+def universe_coverage(conn: sqlite3.Connection, *, min_market_cap: float) -> tuple[int, int]:
+    """(모집단, 지표까지 확보된 종목 수).
+
+    모집단은 "유니버스 후보가 될 자격이 있는 종목" — 시총 하한을 넘는 보통주 중
+    우선주·스팩·관리종목·상장폐지·거래정지를 뺀 것이다. 커버리지는 그 중 지표를 계산해 둔 비율.
+
+    하드 필터 통과 종목 수만 세면 절단된 모수 위에서 세는 것이라 아무것도 검증하지 못한다.
+    값이 아니라 값이 나온 모수를 본다 (점검 2026-08-22 결함 2·4).
+    """
+    # 마지막 봉이 거래정지인 종목은 지표를 계산할 방법이 없다(유효봉 0). 모집단에 남기면
+    # 커버리지가 영원히 100%에 못 미치고, 그 미달분이 무슨 뜻인지 아무도 기억하지 못하게 된다.
+    # 이유를 잊은 채 통과하는 임계값이 애초에 이 결함의 정체였다.
+    where = """
+        FROM listing l
+        WHERE l.is_preferred = 0 AND l.is_spac = 0 AND l.is_managed = 0
+          AND l.market_cap IS NOT NULL AND l.market_cap >= ?
+          AND l.code NOT IN (SELECT DISTINCT code FROM delisting)
+          AND NOT EXISTS (
+              SELECT 1 FROM ohlcv o
+              WHERE o.code = l.code AND o.halted = 1
+                AND o.date = (SELECT MAX(date) FROM ohlcv x WHERE x.code = l.code)
+          )
+    """
+    expected = conn.execute(f"SELECT COUNT(*) {where}", (min_market_cap,)).fetchone()[0]
+    covered = conn.execute(
+        f"SELECT COUNT(*) {where} AND EXISTS (SELECT 1 FROM indicators i WHERE i.code = l.code)",
+        (min_market_cap,),
+    ).fetchone()[0]
+    return expected, covered
+
+
 def delisted_codes(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in conn.execute("SELECT DISTINCT code FROM delisting").fetchall()}
 
