@@ -608,6 +608,33 @@
           "items": {
             "type": "string"
           }
+        },
+        "universe_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "expected",
+            "covered",
+            "pct"
+          ],
+          "description": "유니버스 모집단(시총 하한을 넘는 거래 가능 보통주) 대비 지표까지 확보된 비율. pct 가 1.0 미만이면 여기 실린 상위 종목이 시장의 실제 상위가 아닐 수 있다.",
+          "properties": {
+            "expected": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "모집단 종목 수"
+            },
+            "covered": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "지표까지 확보된 종목 수"
+            },
+            "pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
         }
       }
     }

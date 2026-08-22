@@ -2,12 +2,12 @@
 
 사용:
     python -m data.pipeline listing              # 종목 마스터 + 상장폐지 이력 갱신
-    python -m data.pipeline ohlcv --limit 50     # 일봉 적재 (시총 상위 N)
+    python -m data.pipeline ohlcv                # 일봉 적재 (시총 하한 이상 전 종목)
     python -m data.pipeline ohlcv --full         # 전체 기간 재적재
-    python -m data.pipeline flows --limit 50     # 종목별 기관·외국인 수급
+    python -m data.pipeline flows                # 종목별 기관·외국인 수급
     python -m data.pipeline disclosures --days 5 # DART 공시 수집
     python -m data.pipeline indicators           # 지표 계산
-    python -m data.pipeline daily --limit 300    # 위를 순서대로 (운영 배치)
+    python -m data.pipeline daily                # 위를 순서대로 (운영 배치)
     python -m data.pipeline status               # 적재 현황
 
 운영 시각: 한국시간 18:30 이후 (장 마감 + 수급 확정 반영 여유).
@@ -63,11 +63,17 @@ def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = Tru
     if include_index:
         targets.extend(config.INDEX_SYMBOLS.values())
 
-    codes = store.tradable_codes(conn)
+    codes = store.tradable_codes(conn, min_market_cap=config.INGEST_MIN_MARKET_CAP_KRW)
     if not codes:
         log.error("종목 마스터가 비어 있다. 먼저 `listing`을 실행하라.")
         return
     targets.extend(codes[:limit] if limit else codes)
+    log.info(
+        "일봉 대상 %d종목 (시총 %.0f억 이상)%s",
+        len(codes) if not limit else min(limit, len(codes)),
+        config.INGEST_MIN_MARKET_CAP_BIL_KRW,
+        f" — --limit {limit} 로 잘림" if limit else "",
+    )
 
     ok = fail = 0
     for i, sym in enumerate(targets, 1):
@@ -117,8 +123,14 @@ def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = Tru
 
 def task_flows(conn, *, limit: int | None, pages: int) -> None:
     started = _now()
-    codes = store.tradable_codes(conn)
+    codes = store.tradable_codes(conn, min_market_cap=config.INGEST_MIN_MARKET_CAP_KRW)
     targets = codes[:limit] if limit else codes
+    log.info(
+        "수급 대상 %d종목 (시총 %.0f억 이상)%s",
+        len(targets),
+        config.INGEST_MIN_MARKET_CAP_BIL_KRW,
+        f" — --limit {limit} 로 잘림" if limit else "",
+    )
 
     ok = fail = 0
     for i, code in enumerate(targets, 1):
@@ -277,6 +289,19 @@ def task_status(conn) -> None:
     if row and row[0]:
         print(f"  일봉 기간     {row[0]} ~ {row[1]}")
 
+    # 개수가 아니라 모수 대비 비율을 본다. "몇 종목 적재됨"은 무엇이 빠졌는지 알려주지 않는다.
+    expected, covered = store.universe_coverage(
+        conn, min_market_cap=config.INGEST_MIN_MARKET_CAP_KRW
+    )
+    if expected:
+        pct = covered / expected
+        mark = "" if pct >= 0.95 else "  ⚠ 유니버스에 구멍이 있다"
+        print(
+            f"\n── 유니버스 커버리지 ──\n"
+            f"  모집단 {expected:,}종목 (시총 {config.INGEST_MIN_MARKET_CAP_BIL_KRW:,.0f}억 이상) "
+            f"/ 지표 확보 {covered:,} = {pct:.1%}{mark}"
+        )
+
     print("\n── 최근 배치 (실패만) ──")
     fails = conn.execute(
         "SELECT started_at, task, target, detail FROM ingest_log "
@@ -297,7 +322,13 @@ def main(argv: list[str] | None = None) -> int:
         "task",
         choices=["listing", "ohlcv", "flows", "disclosures", "indicators", "daily", "status"],
     )
-    p.add_argument("--limit", type=int, default=None, help="대상 종목 수 (시총 상위)")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="대상을 시총 상위 N개로 자른다. 시험용 — 운영 배치에서는 쓰지 않는다 "
+        "(자르면 유니버스 모집단에 구멍이 생긴다, 결함 2)",
+    )
     p.add_argument("--full", action="store_true", help="전체 기간 재적재")
     p.add_argument("--pages", type=int, default=1, help="수급 페이지 수 (1페이지=20영업일)")
     p.add_argument("--days", type=int, default=5, help="공시 수집 대상 일수 (오늘부터 역순)")

@@ -17,6 +17,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from data import config as dcfg
+from data import store
 from decision import config, positions, universe
 
 log = logging.getLogger(__name__)
@@ -158,8 +159,38 @@ def refuse_if_stale(conn: sqlite3.Connection, as_of: date) -> str:
     return ohlcv_as_of
 
 
+def check_coverage(conn: sqlite3.Connection) -> dict:
+    """유니버스 모집단이 실제로 얼마나 채워져 있는지 본다.
+
+    유니버스 구축보다 먼저 부른다. 하드 필터 통과 종목 수는 절단된 모수 위에서 세면
+    멀쩡해 보이므로 아무것도 잡아내지 못한다 — 실제로 후보 637종목 중 314종목만 적재된
+    상태에서 205를 세고 조용히 통과했다 (점검 2026-08-22 결함 2·4).
+
+    반환값은 data_quality 에 그대로 실린다. AI가 자기 시야가 얼마나 좁은지 알아야 한다.
+    """
+    expected, covered = store.universe_coverage(conn, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    if expected == 0:
+        raise PackRefused(
+            "유니버스 모집단이 비어 있다. `python -m data.pipeline listing` 을 먼저 실행하라."
+        )
+    pct = covered / expected
+    if pct < config.UNIVERSE_COVERAGE_REFUSE:
+        raise PackRefused(
+            f"유니버스 커버리지 {pct:.0%} ({covered}/{expected}종목) — "
+            f"허용 하한 {config.UNIVERSE_COVERAGE_REFUSE:.0%}. "
+            "모집단의 상당 부분이 데이터 없이 빠져 있어 상위 종목 선정 자체가 무의미하다. "
+            "`python -m data.pipeline daily` 로 적재를 채워라."
+        )
+    return {"expected": expected, "covered": covered, "pct": round(pct, 4)}
+
+
 def _data_quality(
-    conn: sqlite3.Connection, as_of: date, briefings: list[dict], cycle: str, ohlcv_as_of: str
+    conn: sqlite3.Connection,
+    as_of: date,
+    briefings: list[dict],
+    cycle: str,
+    ohlcv_as_of: str,
+    coverage: dict,
 ) -> dict:
     warnings: list[str] = []
 
@@ -189,10 +220,18 @@ def _data_quality(
             f"종목코드 매핑 실패 관점 {unmapped}건 — 유니버스 브리핑 채널에 반영되지 않았다"
         )
 
+    if coverage["pct"] < config.UNIVERSE_COVERAGE_WARN:
+        warnings.append(
+            f"유니버스 커버리지 {coverage['pct']:.0%} "
+            f"({coverage['covered']}/{coverage['expected']}종목) — "
+            "모집단 일부가 데이터 없이 빠져 있다. 상위 종목이 실제 상위가 아닐 수 있다"
+        )
+
     return {
         "ohlcv_as_of": ohlcv_as_of,
         "flows_as_of": flows_as_of,
         "missing_briefings": missing,
+        "universe_coverage": coverage,
         "warnings": warnings,
     }
 
@@ -223,6 +262,9 @@ def build(
         )
 
     ohlcv_as_of = refuse_if_stale(conn, as_of)
+    # 유니버스를 만들기 전에 모집단이 채워져 있는지 본다.
+    # 절단된 모수 위에서 랭킹하면 "상위 60종목"이 상위가 아니게 된다 (결함 2).
+    coverage = check_coverage(conn)
 
     seed = config.account_seed()
     holdings = positions.holdings_value(conn)
@@ -238,7 +280,7 @@ def build(
         )
 
     briefings = _briefings_block(conn, now, cycle)
-    dq = _data_quality(conn, as_of, briefings, cycle, ohlcv_as_of)
+    dq = _data_quality(conn, as_of, briefings, cycle, ohlcv_as_of, coverage)
     dq["warnings"].extend(uni.warnings)
 
     stamp = now.strftime("%Y%m%d-%H%M")
