@@ -161,16 +161,23 @@ paper_positions
 운용 자금 규모와 리스크 한도는 [ADR 0004](adr/0004-repo-visibility.md)에 따라 **환경변수로만** 주입한다.
 
 ```
-AIK_MAX_POSITIONS=8
-AIK_MAX_NEW_ENTRIES_PER_CYCLE=2
-AIK_MAX_WEIGHT_PCT_PER_NAME=12
-AIK_MAX_WEIGHT_PCT_PER_SECTOR=30
-AIK_MAX_RISK_PCT_PER_TRADE=0.5      # 1회 최대 손실 (계좌 대비 %)
-AIK_DAILY_LOSS_LIMIT_KRW=
-AIK_MAX_ORDER_VS_ADV_PCT=3          # 주문금액 / 20일 평균거래대금
+AIK_MAX_POSITIONS=                  # 동시 보유 종목 수          (1~20)
+AIK_MAX_NEW_ENTRIES_PER_CYCLE=      # 사이클당 신규 진입          (0~10)
+AIK_MAX_WEIGHT_PCT_PER_NAME=        # 종목당 비중 상한 %         (0.1~50)
+AIK_MAX_WEIGHT_PCT_PER_SECTOR=      # 섹터당 비중 상한 %         (0.1~100)
+AIK_MAX_RISK_PCT_PER_TRADE=         # 1회 최대 손실, 계좌 대비 % (0.01~5)
+AIK_DAILY_LOSS_LIMIT_KRW=           # 일일 손실 한도, 원          (0~100억)
+AIK_MAX_ORDER_VS_ADV_PCT=           # 주문금액 / 20일 평균거래대금 % (0.1~50)
+AIK_PAPER_EQUITY_KRW=               # 페이퍼 시드, 원             (100만~1000억)
 ```
 
-위 숫자는 **논의를 위한 초안**이지 확정이 아니다. `max_risk_pct_per_trade = 0.5%`는 8종목 동시 보유 시 최대 4% 손실을 뜻한다.
+**이 문서에도 값을 적지 않는다.** 한때 여기에 초안 숫자가 적혀 있었는데, `config.py` 에서 지운 뒤에도
+문서에는 남아 있었다 — 저장소에 커밋하지 않는다는 규칙은 코드에만 적용되는 것이 아니다.
+설정 예시가 필요하면 `.env.example` 을 본다(거기에도 값은 비어 있다).
+
+**기본값은 없다.** 하나라도 비어 있거나, 숫자가 아니거나, 위 범위를 벗어나거나,
+항목 간 조합이 모순이면(예: 종목 비중 상한 > 섹터 비중 상한) `RiskLimitError` 로 팩 생성이 거부된다.
+`python -m decision.pipeline status` 가 무엇이 잘못됐는지 한 번에 보여주고, 정상이 아니면 종료 코드 3 을 낸다.
 
 `blocked_codes`는 당일 손절한 종목을 담는다. 실행 계층이 채우며, 그 전까지는 빈 배열.
 
@@ -248,7 +255,7 @@ python -m decision.pipeline status
 | 거래대금 하한 | 100억원 | 초안(50억)보다 보수적으로 확정 |
 | 시가총액 하한 | 3,000억원 | 초안(1,000억)보다 보수적으로 확정 |
 | `paper_positions` | 이번 단계에서 구현 | '보유 중 판단' 경로를 검증하기 위해 |
-| 리스크 한도 | 초안값 유지 (8종목 / 12% / 0.5%) | 환경변수. 저장소에 값을 남기지 않는다 |
+| 리스크 한도 | 초안값 유지 | 환경변수. **저장소에 값을 남기지 않는다** — 이 표에도 적지 않는다 |
 
 **임계값을 높인 대가:** 코스닥 중소형주가 거의 빠진다. 하드 필터 통과 종목이 150개 미만이면
 3채널 랭킹이 사실상 전수 통과가 되어 의미를 잃으므로, `universe.build()` 가 그 경우 경고를 남긴다
