@@ -10,8 +10,8 @@ import os
 
 # ── 유니버스 ────────────────────────────────────────────
 # 하드 필터: 통과 못하면 무조건 제외. 슬리피지가 전략을 삼키는 구간을 잘라낸다.
-MIN_ADV20_BIL_KRW = 100.0  # 20일 평균 거래대금 하한 (억원)
-MIN_MARKET_CAP_BIL_KRW = 3000.0  # 시가총액 하한 (억원)
+MIN_ADV20_EOK_KRW = 100.0  # 20일 평균 거래대금 하한 (억원)
+MIN_MARKET_CAP_EOK_KRW = 3000.0  # 시가총액 하한 (억원)
 MIN_BARS = 120  # 지표 계산에 필요한 최소 유효봉
 HALT_LOOKBACK_DAYS = 20  # 최근 이 기간에 거래정지 흔적이 있으면 제외
 
@@ -56,7 +56,9 @@ CYCLE_FRESH_KINDS: dict[str, tuple[str, ...]] = {
 CYCLES = tuple(CYCLE_FRESH_KINDS)
 
 # ── 데이터 신선도 ───────────────────────────────────────
-MAX_OHLCV_STALE_DAYS = 2  # 이보다 낡으면 팩 생성 거부
+# 거래일 기준이다. 달력일로 세면 금요일 배치 → 월요일 아침이 3일 낡음으로 잡혀
+# 매주 월요일의 세 사이클이 통째로 거부된다 (점검 2026-08-23 치명 E).
+MAX_OHLCV_STALE_SESSIONS = 2  # 이보다 낡으면 팩 생성 거부
 MAX_FLOWS_STALE_DAYS = 1  # 이보다 낡으면 경고
 MAX_PARSE_WARNINGS = 30  # 브리핑 경고 누적 임계
 

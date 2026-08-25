@@ -176,6 +176,65 @@ def _indicators(conn: sqlite3.Connection, code: str) -> dict:
         return {}
 
 
+def blocked_codes_on(conn: sqlite3.Connection, day: date) -> list[str]:
+    """당일 손실로 청산한 종목. 같은 날 재진입을 막는다.
+
+    빈 배열로 하드코딩돼 있었다 — 아침에 손절한 종목을 점심 사이클에서 다시 사도
+    아무것도 막지 않았다 (점검 2026-08-23).
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT code FROM paper_positions "
+        "WHERE closed_at IS NOT NULL AND substr(closed_at,1,10)=? "
+        "AND COALESCE(realized_pnl_krw,0) < 0 ORDER BY code",
+        (day.isoformat(),),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def cost_basis(conn: sqlite3.Connection) -> int:
+    """열린 포지션의 **취득원가** 합계 (매수 수수료 포함).
+
+    평가금이 아니라 원가다. 현금을 구할 때 평가금을 빼면 손익이 현금으로 둔갑한다 —
+    포지션이 -30% 나면 현금이 30% 늘어나 물타기를 구조적으로 유도하게 된다
+    (점검 2026-08-23 치명 A).
+    """
+    total = 0.0
+    for qty, avg in conn.execute(
+        "SELECT qty, avg_price FROM paper_positions WHERE closed_at IS NULL"
+    ):
+        total += avg * qty * (1 + config.COMMISSION_RATE)
+    return round(total)
+
+
+def realized_pnl_total(conn: sqlite3.Connection) -> int:
+    """청산 완료된 포지션의 실현손익 누계. 수수료·거래세가 이미 반영돼 있다."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl_krw), 0) FROM paper_positions WHERE closed_at IS NOT NULL"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def account_state(conn: sqlite3.Connection, seed_krw: int) -> dict:
+    """계좌 상태를 회계 항등식으로 계산한다.
+
+        cash        = 시드 − Σ취득원가 + Σ실현손익
+        total_equity = cash + Σ평가금
+
+    `total_equity` 를 상수로 두면 실현손실이 계좌에서 사라지고, 포지션 사이징·비중·
+    섹터 한도가 전부 존재하지 않는 자산 위에서 계산된다.
+    """
+    cost = cost_basis(conn)
+    realized = realized_pnl_total(conn)
+    holdings = holdings_value(conn)
+    cash = seed_krw - cost + realized
+    return {
+        "cash_available_krw": cash,
+        "holdings_value_krw": holdings,
+        "total_equity_krw": cash + holdings,
+        "realized_pnl_total_krw": realized,
+    }
+
+
 def holdings_value(conn: sqlite3.Connection) -> int:
     total = 0
     for code, qty, avg in conn.execute(
@@ -195,14 +254,22 @@ def realized_pnl_on(conn: sqlite3.Connection, day: date) -> int:
 
 
 def unrealized_pnl(conn: sqlite3.Connection) -> int:
-    total = 0
+    """평가손익. **순액 기준** — 지금 청산하면 손에 남는 금액이다.
+
+    이 모듈의 `net_yield_pct` 는 수수료·거래세를 빼는데 여기서만 총액을 쓰면
+    같은 `account` 블록 안에 순/총이 섞인다. 그 혼용이 K-Trader 백테스트의 승률을
+    부풀린 원인이었다 (모듈 docstring 참조).
+    """
+    total = 0.0
     for code, qty, avg in conn.execute(
         "SELECT code, qty, avg_price FROM paper_positions WHERE closed_at IS NULL"
     ):
         cur, _ = _last_close(conn, code)
         if cur:
-            total += (cur - avg) * qty
-    return int(total)
+            buy_cost = avg * qty * (1 + config.COMMISSION_RATE)
+            sell_net = cur * qty * (1 - config.COMMISSION_RATE - config.TAX_RATE)
+            total += sell_net - buy_cost
+    return round(total)
 
 
 def now_kst_iso() -> str:
