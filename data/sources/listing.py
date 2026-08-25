@@ -10,6 +10,7 @@ FinanceDataReader를 쓴다. 단, **일봉에는 쓰지 않는다** — FDR의 �
 from __future__ import annotations
 
 import logging
+import re
 
 import FinanceDataReader as fdr
 import pandas as pd
@@ -141,6 +142,18 @@ _SECTOR_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+_MANAGED_DEPT = re.compile(r"관리종목|투자주의환기")
+
+
+def is_managed_dept(dept: object) -> bool:
+    """코스닥 소속부 표기로 본 관리종목·투자주의환기 여부.
+
+    **KOSPI 는 소속부가 전부 비어 있으므로 이 신호만으로는 판정할 수 없다.**
+    네이버 `isManagement` 와 합집합으로 써야 두 시장이 모두 덮인다.
+    """
+    return bool(isinstance(dept, str) and _MANAGED_DEPT.search(dept))
+
+
 def sector_group(industry: object) -> str:
     """한국표준산업분류 문자열 → 14개 대분류. 매칭 실패는 '기타'.
 
@@ -212,7 +225,7 @@ def fetch_listed(markets: tuple[str, ...] = _MARKETS) -> pd.DataFrame:
 
     dept = out["dept"].fillna("").astype(str)
     # 소속부 표시로 관리종목·투자주의환기종목을 잡는다. 거래는 되지만 스윙 대상이 아니다.
-    out["is_managed"] = dept.str.contains("관리종목|투자주의환기", regex=True, na=False)
+    out["is_managed"] = dept.map(is_managed_dept)
     out["is_spac"] = out["is_spac"] | dept.str.contains("SPAC", na=False)
     out["sector"] = out["industry"]
     out["sector_group"] = out["industry"].map(sector_group)
