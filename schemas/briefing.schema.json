@@ -283,13 +283,13 @@
       "description": "단위는 억원. 코스피/코스닥 구분과 단위 혼동이 잦은 지점이다.",
       "additionalProperties": false,
       "properties": {
-        "foreign_bil_krw": {
+        "foreign_eok_krw": {
           "type": "number"
         },
-        "institution_bil_krw": {
+        "institution_eok_krw": {
           "type": "number"
         },
-        "retail_bil_krw": {
+        "retail_eok_krw": {
           "type": "number"
         }
       }

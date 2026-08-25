@@ -758,7 +758,7 @@
             "null"
           ]
         },
-        "adv20_bil_krw": {
+        "adv20_eok_krw": {
           "type": [
             "number",
             "null"
@@ -772,7 +772,7 @@
           ],
           "description": "당일 거래량 ÷ 20일 평균"
         },
-        "market_cap_bil_krw": {
+        "market_cap_eok_krw": {
           "type": [
             "number",
             "null"
@@ -791,7 +791,7 @@
           ],
           "description": "외국인 연속 순매수 일수"
         },
-        "foreign_net_5d_bil_krw": {
+        "foreign_net_5d_eok_krw": {
           "type": [
             "number",
             "null"
@@ -803,7 +803,7 @@
             "null"
           ]
         },
-        "inst_net_5d_bil_krw": {
+        "inst_net_5d_eok_krw": {
           "type": [
             "number",
             "null"
