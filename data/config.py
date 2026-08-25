@@ -10,6 +10,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# DATA_DIR 을 읽기 전에 .env 가 로드돼야 한다 — 아래 참조.
+from data import env as _env  # noqa: F401
+
 KST = ZoneInfo("Asia/Seoul")
 
 # ── 경로 ────────────────────────────────────────────────
