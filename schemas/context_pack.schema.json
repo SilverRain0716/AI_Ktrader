@@ -119,7 +119,7 @@
       "properties": {
         "total_equity_krw": {
           "type": "integer",
-          "description": "예수금 + 보유 평가금"
+          "description": "예수금 + 보유 평가금. 시드가 아니라 파생값이므로 하한을 두지 않는다"
         },
         "cash_available_krw": {
           "type": "integer",
@@ -532,40 +532,58 @@
     },
     "constraints": {
       "type": "object",
-      "description": "AI가 반드시 지켜야 하는 한도. 실행 계층이 동일한 값으로 재검증한다.",
+      "description": "AI가 반드시 지켜야 하는 한도. 실행 계층이 동일한 값으로 재검증한다. 값은 전부 AIK_* 환경변수로만 주입되며 기본값이 없다 (ADR 0004).",
       "required": [
         "max_positions",
+        "max_new_entries_this_cycle",
         "max_weight_pct_per_name",
+        "max_weight_pct_per_sector",
         "max_risk_pct_per_trade",
-        "daily_loss_limit_krw"
+        "daily_loss_limit_krw",
+        "max_order_vs_adv_pct"
       ],
       "additionalProperties": false,
       "properties": {
         "max_positions": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
         },
         "max_new_entries_this_cycle": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
         },
         "max_weight_pct_per_name": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 50.0
         },
         "max_weight_pct_per_sector": {
-          "type": "number"
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 100.0
         },
         "max_risk_pct_per_trade": {
           "type": "number",
-          "description": "1회 최대 손실(계좌 대비 %). 포지션 크기 = (총자산 × 이 값) ÷ 손절폭"
+          "description": "1회 최대 손실(계좌 대비 %). 포지션 크기 = (총자산 × 이 값) ÷ 손절폭",
+          "minimum": 0.01,
+          "maximum": 5.0
         },
         "daily_loss_limit_krw": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000000,
+          "description": "일일 손실 한도(원). 0은 '비활성'이며 data_quality 에 경고가 남는다"
         },
         "daily_loss_limit_hit": {
           "type": "boolean"
         },
         "max_order_vs_adv_pct": {
           "type": "number",
-          "description": "주문금액 / 20일 평균 거래대금 상한(%). 슬리피지 방어."
+          "description": "주문금액 / 20일 평균 거래대금 상한(%). 슬리피지 방어.",
+          "minimum": 0.1,
+          "maximum": 50.0
         },
         "blocked_codes": {
           "type": "array",
