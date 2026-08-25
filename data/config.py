@@ -54,8 +54,12 @@ ADV_PERIOD = 20  # 평균 거래대금 기간
 #
 # 이 값은 decision 계층 하드 필터의 시총 하한과 같아야 한다. 낮으면 모집단에 구멍이 남고,
 # 높으면 적재만 낭비된다. tests/test_data_layer.py 가 두 값의 정합성을 고정한다.
-INGEST_MIN_MARKET_CAP_BIL_KRW = 3000.0
-INGEST_MIN_MARKET_CAP_KRW = INGEST_MIN_MARKET_CAP_BIL_KRW * 1e8
+INGEST_MIN_MARKET_CAP_EOK_KRW = 3000.0
+INGEST_MIN_MARKET_CAP_KRW = INGEST_MIN_MARKET_CAP_EOK_KRW * 1e8
+
+# 52주 고가. 봉 개수로 자르되, 이만큼도 없으면 '52주'라고 부를 수 없으므로 null 로 둔다.
+HIGH_52W_PERIOD = 252
+HIGH_52W_MIN_BARS = 200
 
 MIN_BARS_FOR_INDICATORS = 120
 

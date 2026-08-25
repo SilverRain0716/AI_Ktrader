@@ -150,13 +150,36 @@ def refuse_if_stale(conn: sqlite3.Connection, as_of: date) -> str:
     ohlcv_as_of = row[0] if row and row[0] else None
     if not ohlcv_as_of:
         raise PackRefused("일봉 데이터가 없다. `python -m data.pipeline ohlcv` 를 먼저 실행하라.")
-    stale = (as_of - date.fromisoformat(ohlcv_as_of)).days
-    if stale > config.MAX_OHLCV_STALE_DAYS:
+    # 달력일로 세면 매주 월요일 아침이 거부된다 — 금요일 배치 이후 3일이 지나기 때문이다.
+    # 실제로 낡았는지는 "그 사이에 장이 몇 번 섰는가"로 봐야 한다 (점검 2026-08-23 치명 E).
+    stale = _sessions_missed(conn, ohlcv_as_of, as_of)
+    if stale > config.MAX_OHLCV_STALE_SESSIONS:
         raise PackRefused(
-            f"일봉 최신일이 {ohlcv_as_of} 로 {stale}일 낡았다 "
-            f"(허용 {config.MAX_OHLCV_STALE_DAYS}일). 낡은 가격으로 판단하지 않는다."
+            f"일봉 최신일이 {ohlcv_as_of} 로 거래일 {stale}회분 낡았다 "
+            f"(허용 {config.MAX_OHLCV_STALE_SESSIONS}회). 낡은 가격으로 판단하지 않는다."
         )
     return ohlcv_as_of
+
+
+def _sessions_missed(conn: sqlite3.Connection, last: str, as_of: date) -> int:
+    """마지막 적재일 이후 지나간 거래일 수.
+
+    지수(KOSPI/KOSDAQ)는 휴장일에 봉이 없으므로 거래일 달력 노릇을 한다.
+    지수마저 없으면 달력일로 물러서되, 주말 2일은 빼고 센다.
+    """
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT date) FROM ohlcv WHERE code IN (?, ?) AND date > ? AND date <= ?",
+        (*dcfg.INDEX_SYMBOLS.values(), last, as_of.isoformat()),
+    ).fetchone()
+    if row and row[0]:
+        return int(row[0])
+    days = (as_of - date.fromisoformat(last)).days
+    weekends = sum(
+        1
+        for i in range(1, days + 1)
+        if (date.fromisoformat(last) + timedelta(days=i)).weekday() >= 5
+    )
+    return max(0, days - weekends)
 
 
 def check_coverage(conn: sqlite3.Connection) -> dict:
@@ -220,6 +243,13 @@ def _data_quality(
             f"종목코드 매핑 실패 관점 {unmapped}건 — 유니버스 브리핑 채널에 반영되지 않았다"
         )
 
+    unknown = store.managed_unknown_count(conn, min_market_cap=dcfg.INGEST_MIN_MARKET_CAP_KRW)
+    if unknown:
+        warnings.append(
+            f"관리종목 판정 불가 {unknown}종목 — 이들은 '정상'이 아니라 '모름'이다. "
+            "하드 필터가 걸러내지 못했을 수 있다"
+        )
+
     disc_since, _ = store.disclosure_span(conn)
     if not disc_since:
         warnings.append(
@@ -274,12 +304,14 @@ def build(
     coverage = check_coverage(conn)
 
     seed = config.account_seed()
-    holdings = positions.holdings_value(conn)
-    total_equity = seed["total_equity_krw"]
+    # 회계 항등식으로 계산한다. total_equity 를 상수로 두면 실현손실이 계좌에서 사라지고,
+    # 평가금을 빼서 현금을 구하면 손실이 매수 여력으로 둔갑한다 (치명 A).
+    acct = positions.account_state(conn, seed["total_equity_krw"])
+    total_equity = acct["total_equity_krw"]
     pos = positions.load_open(conn, as_of, total_equity)
     held_codes = {p["code"] for p in pos}
 
-    uni = universe.build(conn, as_of, exclude=held_codes)
+    uni = universe.build(conn, as_of, now=now, exclude=held_codes)
     if len(uni.candidates) < config.MIN_UNIVERSE_SIZE:
         raise PackRefused(
             f"유니버스가 {len(uni.candidates)}종목뿐이다 (최소 {config.MIN_UNIVERSE_SIZE}). "
@@ -290,6 +322,9 @@ def build(
     dq = _data_quality(conn, as_of, briefings, cycle, ohlcv_as_of, coverage)
     dq["warnings"].extend(uni.warnings)
 
+    constraints = config.constraints()
+    limit = constraints.get("daily_loss_limit_krw") or 0
+
     stamp = now.strftime("%Y%m%d-%H%M")
     pack: dict = {
         "pack_id": f"{stamp}-{cycle}",
@@ -298,7 +333,7 @@ def build(
         "market": _market_block(conn, cycle),
         "account": {
             "total_equity_krw": total_equity,
-            "cash_available_krw": max(0, total_equity - holdings),
+            "cash_available_krw": acct["cash_available_krw"],
             "realized_pnl_today_krw": positions.realized_pnl_on(conn, as_of),
             "unrealized_pnl_krw": positions.unrealized_pnl(conn),
             "is_mock": seed["is_mock"],
@@ -307,7 +342,14 @@ def build(
         "universe": [c.to_pack_item() for c in uni.candidates],
         "briefings": briefings,
         "recent_decisions": [],
-        "constraints": {**config.constraints(), "daily_loss_limit_hit": False, "blocked_codes": []},
+        "constraints": {
+            **constraints,
+            # 하드코딩된 상수였다. 환경변수로 한도를 정성껏 주입해도 아무 효과가 없었다.
+            "daily_loss_limit_hit": bool(
+                limit and positions.realized_pnl_on(conn, as_of) <= -abs(limit)
+            ),
+            "blocked_codes": positions.blocked_codes_on(conn, as_of),
+        },
         "data_quality": dq,
     }
     if event_trigger:

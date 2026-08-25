@@ -41,9 +41,9 @@ class Indicators:
     atr_pct: float | None = None
     rs20: float | None = None
     high_52w_gap_pct: float | None = None
-    adv20_bil_krw: float | None = None
+    adv20_eok_krw: float | None = None
     volume_ratio: float | None = None
-    market_cap_bil_krw: float | None = None
+    market_cap_eok_krw: float | None = None
 
     def to_dict(self) -> dict:
         return {k: _clean(v) for k, v in asdict(self).items()}
@@ -74,7 +74,7 @@ def compute(
     Args:
         ohlcv: store.load_ohlcv() 결과 (거래정지일 제외됨, date 오름차순)
         benchmark: 상대강도(rs20) 계산용 지수 일봉. 없으면 rs20=None
-        market_cap_krw: 시가총액(원). 없으면 market_cap_bil_krw=None
+        market_cap_krw: 시가총액(원). 없으면 market_cap_eok_krw=None
     """
     n = len(ohlcv)
     if n == 0:
@@ -121,20 +121,25 @@ def compute(
         # 손절 = 진입가 - 2×ATR, 수량 = (총자산 × 최대손실%) ÷ (2×ATR)
         ind.atr_pct = ind.atr14 / close[-1] * 100.0
 
-    # 52주 고점 대비 위치
-    win = close[-min(n, 252) :]
-    hi = float(np.max(win))
-    if hi > 0:
-        ind.high_52w_gap_pct = (close[-1] / hi - 1.0) * 100.0
+    # 52주 고점 대비 위치.
+    # 종가 최댓값을 쓰면 장중에만 찍은 고가를 놓친다. max(close) <= max(high) 이므로
+    # 오차가 항상 한 방향 — 갭이 실제보다 0에 가깝게 나와 "신고가 근접" 위양성이 된다
+    # (점검 2026-08-23 F). 봉이 부족하면 52주가 아니므로 null 로 둔다.
+    if n >= config.HIGH_52W_MIN_BARS:
+        hi = float(np.max(high[-min(n, config.HIGH_52W_PERIOD) :]))
+        if hi > 0:
+            ind.high_52w_gap_pct = (close[-1] / hi - 1.0) * 100.0
 
     # 거래대금 (억원). 종가×거래량은 근사치다 — 정확한 거래대금 TR이 붙으면 교체한다.
     amount = close * volume
     if n >= config.ADV_PERIOD:
-        ind.adv20_bil_krw = float(np.mean(amount[-config.ADV_PERIOD :])) / 1e8
-    vol_ma = talib.SMA(volume, config.ADV_PERIOD)
-    last_vol_ma = _last(vol_ma)
-    if last_vol_ma and last_vol_ma > 0:
-        ind.volume_ratio = float(volume[-1]) / last_vol_ma
+        ind.adv20_eok_krw = float(np.mean(amount[-config.ADV_PERIOD :])) / 1e8
+    # 당일을 분모에 넣으면 급증이 축소된다 — 10배가 6.9배로 읽힌다 (점검 2026-08-23 G).
+    # "직전 N일 대비 오늘"이 의도이므로 분모에서 당일을 뺀다.
+    if n > config.ADV_PERIOD:
+        prior_mean = float(np.mean(volume[-config.ADV_PERIOD - 1 : -1]))
+        if prior_mean > 0:
+            ind.volume_ratio = float(volume[-1]) / prior_mean
 
     # 상대강도: 종목 20일 수익률 − 지수 20일 수익률.
     # 시장이 올라서 오른 것인지, 종목이 강한 것인지 구분하는 유일한 지표.
@@ -142,7 +147,7 @@ def compute(
         ind.rs20 = _relative_strength(ohlcv, benchmark, config.RS_PERIOD)
 
     if market_cap_krw:
-        ind.market_cap_bil_krw = float(market_cap_krw) / 1e8
+        ind.market_cap_eok_krw = float(market_cap_krw) / 1e8
 
     return ind
 
@@ -183,9 +188,9 @@ def compute_flows(flows: pd.DataFrame, close_series: pd.Series | None = None) ->
     """
     out = {
         "foreign_net_days": None,
-        "foreign_net_5d_bil_krw": None,
+        "foreign_net_5d_eok_krw": None,
         "inst_net_days": None,
-        "inst_net_5d_bil_krw": None,
+        "inst_net_5d_eok_krw": None,
         "foreign_hold_pct": None,
         "short_ratio_pct": None,  # 공매도는 키움 REST ka10014 연동 후
         "as_of": None,
@@ -202,8 +207,8 @@ def compute_flows(flows: pd.DataFrame, close_series: pd.Series | None = None) ->
     tail = f.tail(5)
     if close_series is not None and len(close_series) > 0:
         px = float(close_series.iloc[-1])
-        out["foreign_net_5d_bil_krw"] = _clean(float(tail["foreign_net_qty"].sum()) * px / 1e8)
-        out["inst_net_5d_bil_krw"] = _clean(float(tail["inst_net_qty"].sum()) * px / 1e8)
+        out["foreign_net_5d_eok_krw"] = _clean(float(tail["foreign_net_qty"].sum()) * px / 1e8)
+        out["inst_net_5d_eok_krw"] = _clean(float(tail["inst_net_qty"].sum()) * px / 1e8)
     return out
 
 

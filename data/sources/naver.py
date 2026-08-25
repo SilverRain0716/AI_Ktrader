@@ -168,6 +168,30 @@ class FlowRow:
     foreign_hold_pct: float
 
 
+_BASIC_URL = "https://m.stock.naver.com/api/stock/{code}/basic"
+
+
+def fetch_is_managed(code: str) -> bool:
+    """관리종목 여부.
+
+    FDR 의 소속부(`Dept`)는 **코스닥에만 있다** — KOSPI 942종목은 전부 결측이라
+    `is_managed` 가 코스닥 전용 필터로 조용히 동작하고 있었다 (점검 2026-08-23 치명 D).
+    실측에서 KOSPI 소형주 40종목 중 18건이 관리종목이었고 전부 하드 필터를 통과했다.
+
+    네이버 모바일 API 의 `isManagement` 는 두 시장 모두 준다. 정상 종목에는 키 자체가 없다.
+    HTML 이 아니라 JSON 이라 구조 변경에 비교적 강하지만, 그래도 외부 사설 API 다 —
+    실패는 삼키지 않고 올려서 호출 측이 '판정 불가'로 남기게 한다.
+    """
+    txt = _get(_BASIC_URL.format(code=code), {})
+    try:
+        payload = json.loads(txt)
+    except json.JSONDecodeError as e:
+        raise NaverFetchError(f"{code}: basic 응답이 JSON이 아니다 — {e}") from e
+    if not isinstance(payload, dict) or "stockName" not in payload:
+        raise NaverFetchError(f"{code}: basic 응답 형식이 바뀌었다 (stockName 없음)")
+    return bool(payload.get("isManagement"))
+
+
 def fetch_investor_flows(code: str, pages: int = 1) -> pd.DataFrame:
     """종목별 기관·외국인 순매매.
 

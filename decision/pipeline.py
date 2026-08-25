@@ -90,7 +90,7 @@ def task_status(conn) -> int:
     print("\n── 현재 설정 ──")
     print(f"   유니버스 상한 {config.UNIVERSE_MAX} (채널 {config.CHANNEL_QUOTA})")
     print(
-        f"   하드 필터: 거래대금 ≥ {config.MIN_ADV20_BIL_KRW:.0f}억 / 시총 ≥ {config.MIN_MARKET_CAP_BIL_KRW:.0f}억"
+        f"   하드 필터: 거래대금 ≥ {config.MIN_ADV20_EOK_KRW:.0f}억 / 시총 ≥ {config.MIN_MARKET_CAP_EOK_KRW:.0f}억"
     )
     print(f"   리스크 한도: {config.constraints()}")
 

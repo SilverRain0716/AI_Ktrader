@@ -107,15 +107,15 @@ def _seed_stock(
             "atr_pct": 2.0,
             "rs20": rs,
             "high_52w_gap_pct": -5.0,
-            "adv20_bil_krw": adv,
+            "adv20_eok_krw": adv,
             "volume_ratio": 1.2,
-            "market_cap_bil_krw": cap,
+            "market_cap_eok_krw": cap,
         },
         "flows": {
             "foreign_net_days": f_days,
-            "foreign_net_5d_bil_krw": net5,
+            "foreign_net_5d_eok_krw": net5,
             "inst_net_days": i_days,
-            "inst_net_5d_bil_krw": 0.0,
+            "inst_net_5d_eok_krw": 0.0,
             "foreign_hold_pct": 30.0,
             "short_ratio_pct": 1.0,
             "as_of": AS_OF.isoformat(),
@@ -513,8 +513,8 @@ def test_유니버스가_비면_거부(db):
 def test_커버리지는_멀쩡한데_필터가_전부_잘라내면_유니버스로_거부(db):
     """데이터는 다 있는데 임계값이 높아 아무도 못 통과하는 경우. 커버리지 문제와 구분한다."""
     db.execute(
-        "UPDATE indicators SET payload = replace(payload, '\"adv20_bil_krw\": 200.0', "
-        "'\"adv20_bil_krw\": 1.0')"
+        "UPDATE indicators SET payload = replace(payload, '\"adv20_eok_krw\": 200.0', "
+        "'\"adv20_eok_krw\": 1.0')"
     )
     with pytest.raises(pack.PackRefused, match="유니버스"):
         pack.build(db, cycle="premarket", generated_at=NOW)
@@ -572,8 +572,8 @@ def test_토큰_추정(db):
 def test_적재_하한과_하드필터_시총_하한이_일치한다():
     """어긋나면 조용히 구멍이 생긴다. 낮으면 모집단 결손, 높으면 적재 낭비.
     이 등식이 커버리지 지표가 의미를 갖는 유일한 근거다."""
-    assert dcfg.INGEST_MIN_MARKET_CAP_BIL_KRW == config.MIN_MARKET_CAP_BIL_KRW
-    assert dcfg.INGEST_MIN_MARKET_CAP_KRW == config.MIN_MARKET_CAP_BIL_KRW * 1e8
+    assert dcfg.INGEST_MIN_MARKET_CAP_EOK_KRW == config.MIN_MARKET_CAP_EOK_KRW
+    assert dcfg.INGEST_MIN_MARKET_CAP_KRW == config.MIN_MARKET_CAP_EOK_KRW * 1e8
 
 
 def test_지표없는_종목도_모집단에는_들어간다(db):
@@ -651,3 +651,176 @@ def test_커버리지_거부는_유니버스_구축보다_먼저_난다(db):
     finally:
         universe.build = orig
     assert not calls, "커버리지가 깨졌는데 유니버스를 만들었다"
+
+
+# ── 회계·시점 (점검 2026-08-23 치명 A·B·C·E) ────────────
+
+
+def test_손실은_매수여력을_늘리지_않는다(db):
+    """cash = 시드 − 취득원가 + 실현손익. 평가금을 빼면 손익이 현금으로 둔갑한다 —
+    -30% 나면 현금이 30% 늘어 물타기를 구조적으로 유도했다."""
+    positions.open_position(
+        db,
+        position_id="p1",
+        code="000660",
+        name="SK",
+        qty=1000,
+        avg_price=50000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    cash = []
+    for px in (50000, 35000, 65000):
+        db.execute(
+            "UPDATE ohlcv SET close=?, high=?, low=?, open=? WHERE code='000660'", (px, px, px, px)
+        )
+        cash.append(positions.account_state(db, 100_000_000)["cash_available_krw"])
+    assert len(set(cash)) == 1, f"주가에 따라 현금이 변했다: {cash}"
+
+
+def test_총자산이_평가손익을_따라간다(db):
+    positions.open_position(
+        db,
+        position_id="p1",
+        code="000660",
+        name="SK",
+        qty=1000,
+        avg_price=50000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    db.execute("UPDATE ohlcv SET close=35000 WHERE code='000660'")
+    a = positions.account_state(db, 100_000_000)
+    assert a["total_equity_krw"] == a["cash_available_krw"] + a["holdings_value_krw"]
+    assert a["total_equity_krw"] < 100_000_000, "평가손실이 총자산에 반영되지 않았다"
+
+
+def test_실현손실이_계좌에서_사라지지_않는다(db):
+    """total_equity 를 상수로 두면 손절해도 총자산이 그대로다."""
+    positions.open_position(
+        db,
+        position_id="p1",
+        code="000660",
+        name="SK",
+        qty=1000,
+        avg_price=50000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    positions.close_position(
+        db, "p1", closed_at="2026-08-20T15:00:00+09:00", exit_price=35000, exit_reason="손절"
+    )
+    a = positions.account_state(db, 100_000_000)
+    assert a["realized_pnl_total_krw"] < -14_000_000
+    assert a["total_equity_krw"] < 86_000_000
+
+
+def test_당일_손절_종목은_재진입이_금지된다(db):
+    positions.open_position(
+        db,
+        position_id="p1",
+        code="000660",
+        name="SK",
+        qty=10,
+        avg_price=50000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    positions.close_position(
+        db,
+        "p1",
+        closed_at=f"{AS_OF.isoformat()}T15:00:00+09:00",
+        exit_price=35000,
+        exit_reason="손절",
+    )
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert "000660" in p["constraints"]["blocked_codes"]
+
+
+def test_이익_청산은_재진입을_막지_않는다(db):
+    positions.open_position(
+        db,
+        position_id="p1",
+        code="000660",
+        name="SK",
+        qty=10,
+        avg_price=50000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    positions.close_position(
+        db,
+        "p1",
+        closed_at=f"{AS_OF.isoformat()}T15:00:00+09:00",
+        exit_price=70000,
+        exit_reason="익절",
+    )
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert p["constraints"]["blocked_codes"] == []
+
+
+def test_브리핑_채널이_미래_브리핑을_읽지_않는다(db):
+    """pack 의 브리핑 블록은 상한을 걸고 있었는데 유니버스 채널 쿼리에는 없었다.
+    팩에는 없는 브리핑을 근거로 종목이 유니버스에 오르는 모순이 생겼다."""
+    from datetime import time as dtime
+
+    _seed_briefing(db, "051910", day=AS_OF.isoformat(), kind="kr-close-deep")
+    db.execute(
+        "UPDATE briefings SET published_at=? WHERE briefing_id=?",
+        (f"{AS_OF.isoformat()}T18:00:00+09:00", f"{AS_OF.isoformat()}-1800-kr-close-deep"),
+    )
+
+    morning = datetime.combine(AS_OF, dtime(8, 20), tzinfo=dcfg.KST)
+    res = universe.build(db, AS_OF, now=morning)
+    reasons = [r for c in res.candidates for r in c.screen_reasons if r.startswith("briefing")]
+    assert reasons == [], f"08:20 에 18:00 브리핑을 읽었다: {reasons}"
+
+    evening = datetime.combine(AS_OF, dtime(18, 30), tzinfo=dcfg.KST)
+    res2 = universe.build(db, AS_OF, now=evening)
+    reasons2 = [r for c in res2.candidates for r in c.screen_reasons if r.startswith("briefing")]
+    assert reasons2, "발행 후에는 읽어야 한다"
+
+
+def test_미래_거래정지를_미리_피하지_않는다(db):
+    """as_of 이후의 정지 이력이 오늘의 하드 필터에 영향을 주면 완벽한 미래 정보다."""
+    before = set(universe.hard_filter(db, AS_OF))
+    future = (AS_OF + timedelta(days=10)).isoformat()
+    db.execute(
+        "INSERT OR REPLACE INTO ohlcv (code,date,open,high,low,close,volume,"
+        "foreign_hold_pct,halted,source,adjusted) "
+        "VALUES ('000660',?,1,1,1,1,0,NULL,1,'t',1)",
+        (future,),
+    )
+    assert set(universe.hard_filter(db, AS_OF)) == before
+
+
+def test_월요일_아침에_거부되지_않는다(db):
+    """달력일로 세면 금요일 배치 → 월요일 아침이 3일 낡음으로 잡혔다."""
+    db.execute("DELETE FROM ohlcv WHERE code IN ('KOSPI','KOSDAQ')")
+    for d in ("2026-08-19", "2026-08-20", "2026-08-21"):  # 수·목·금
+        for sym in ("KOSPI", "KOSDAQ"):
+            db.execute(
+                "INSERT INTO ohlcv (code,date,open,high,low,close,volume,halted,source,adjusted)"
+                " VALUES (?,?,3000,3000,3000,3000,1,0,'t',1)",
+                (sym, d),
+            )
+    pack.refuse_if_stale(db, date(2026, 8, 24))  # 월요일 — 거부되면 예외
+
+
+def test_실제로_낡으면_여전히_거부한다(db):
+    db.execute("DELETE FROM ohlcv WHERE code IN ('KOSPI','KOSDAQ')")
+    for d in ("2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21"):
+        for sym in ("KOSPI", "KOSDAQ"):
+            db.execute(
+                "INSERT INTO ohlcv (code,date,open,high,low,close,volume,halted,source,adjusted)"
+                " VALUES (?,?,3000,3000,3000,3000,1,0,'t',1)",
+                (sym, d),
+            )
+    with pytest.raises(pack.PackRefused, match="낡았다"):
+        pack.refuse_if_stale(db, date(2026, 8, 27))  # 목요일 — 거래일 4회분
+
+
+def test_관리종목_판정_불가는_경고로_드러난다(db):
+    """is_managed=0 이 '아니다'와 '모른다'를 겸하면 판정 실패가 조용히 통과가 된다."""
+    db.execute("UPDATE listing SET is_managed_known=0")
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert any("판정 불가" in w for w in p["data_quality"]["warnings"])
+
+    db.execute("UPDATE listing SET is_managed_known=1")
+    p2 = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert not any("판정 불가" in w for w in p2["data_quality"]["warnings"])

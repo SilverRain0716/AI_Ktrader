@@ -55,6 +55,57 @@ def task_listing(conn) -> None:
     store.log_ingest(conn, started_at=started, task="delisting", target=None, status="ok", rows=m)
     log.info("상장폐지 이력 %d건 (생존편향 방지용)", m)
 
+    task_managed(conn)
+
+
+def task_managed(conn) -> None:
+    """관리종목 판정.
+
+    FDR 소속부는 코스닥에만 있어 KOSPI 관리종목이 하나도 걸러지지 않았다 (치명 D).
+    네이버 basic API 로 두 시장 모두 판정한다.
+
+    **판정에 실패한 종목은 정상으로 두지 않는다.** `is_managed_known=0` 으로 표시해
+    "관리종목이 아니다"와 "모른다"를 구분한다 — 둘을 섞으면 실패가 조용히 통과가 된다.
+    """
+    started = _now()
+    rows = conn.execute(
+        "SELECT code, dept FROM listing WHERE is_preferred=0 AND is_spac=0 "
+        "AND market_cap >= ? ORDER BY market_cap DESC",
+        (config.INGEST_MIN_MARKET_CAP_KRW,),
+    ).fetchall()
+    log.info("관리종목 판정 대상 %d종목", len(rows))
+
+    hit = unknown = 0
+    for i, (code, dept) in enumerate(rows, 1):
+        try:
+            # 두 신호는 서로를 덮어쓰지 않는다 — 잡는 것이 다르다.
+            #   FDR 소속부 : 코스닥 관리종목 + **투자주의환기** (KOSPI 는 전부 결측)
+            #   네이버      : 양 시장 관리종목 (투자주의환기는 안 잡는다)
+            # 처음엔 네이버로 덮어썼다가 메지온·에스티큐브 등 투자주의환기 4종목을 잃었다.
+            managed = listing_src.is_managed_dept(dept) or naver.fetch_is_managed(code)
+            conn.execute(
+                "UPDATE listing SET is_managed=?, is_managed_known=1 WHERE code=?",
+                (int(managed), code),
+            )
+            hit += int(managed)
+        except Exception as e:
+            unknown += 1
+            conn.execute("UPDATE listing SET is_managed_known=0 WHERE code=?", (code,))
+            log.warning("관리종목 판정 실패 %s: %s", code, e)
+        if i % 200 == 0:
+            log.info("관리종목 진행 %d/%d", i, len(rows))
+
+    store.log_ingest(
+        conn,
+        started_at=started,
+        task="managed",
+        target=None,
+        status="ok",
+        rows=hit,
+        detail=f"판정불가 {unknown}",
+    )
+    log.info("관리종목 판정 완료 — 관리종목 %d / 판정불가 %d", hit, unknown)
+
 
 def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = True) -> None:
     started = _now()
@@ -71,7 +122,7 @@ def task_ohlcv(conn, *, limit: int | None, full: bool, include_index: bool = Tru
     log.info(
         "일봉 대상 %d종목 (시총 %.0f억 이상)%s",
         len(codes) if not limit else min(limit, len(codes)),
-        config.INGEST_MIN_MARKET_CAP_BIL_KRW,
+        config.INGEST_MIN_MARKET_CAP_EOK_KRW,
         f" — --limit {limit} 로 잘림" if limit else "",
     )
 
@@ -154,7 +205,7 @@ def task_flows(conn, *, limit: int | None, pages: int) -> None:
     log.info(
         "수급 대상 %d종목 (시총 %.0f억 이상)%s",
         len(targets),
-        config.INGEST_MIN_MARKET_CAP_BIL_KRW,
+        config.INGEST_MIN_MARKET_CAP_EOK_KRW,
         f" — --limit {limit} 로 잘림" if limit else "",
     )
 
@@ -324,7 +375,7 @@ def task_status(conn) -> None:
         mark = "" if pct >= 0.95 else "  ⚠ 유니버스에 구멍이 있다"
         print(
             f"\n── 유니버스 커버리지 ──\n"
-            f"  모집단 {expected:,}종목 (시총 {config.INGEST_MIN_MARKET_CAP_BIL_KRW:,.0f}억 이상) "
+            f"  모집단 {expected:,}종목 (시총 {config.INGEST_MIN_MARKET_CAP_EOK_KRW:,.0f}억 이상) "
             f"/ 지표 확보 {covered:,} = {pct:.1%}{mark}"
         )
 

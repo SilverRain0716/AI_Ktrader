@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -45,10 +45,11 @@ CREATE TABLE IF NOT EXISTS listing (
     name         TEXT,
     market       TEXT,
     sector       TEXT,          -- 한국표준산업분류 원문 (158종)
-    sector_group TEXT,          -- 14개 대분류. 섹터 집중도 한도는 이걸로 판정한다
+    sector_group TEXT,          -- 업종 대분류. 섹터 집중도 한도는 이걸로 판정한다
     industry     TEXT,
-    dept         TEXT,          -- 코스닥 소속부. 관리종목 식별의 유일한 무료 신호
+    dept         TEXT,          -- 코스닥 소속부. **KOSPI 는 전부 비어 있다**
     is_managed   INTEGER NOT NULL DEFAULT 0,
+    is_managed_known INTEGER NOT NULL DEFAULT 0,  -- 판정을 실제로 했는가. 0이면 '모른다'
     listing_date TEXT,
     market_cap   REAL,
     shares       REAL,
@@ -279,6 +280,20 @@ def _migrate_v7(conn):
     )
 
 
+def _migrate_v8(conn):
+    """관리종목 '판정 여부'를 분리한다.
+
+    is_managed=0 이 "관리종목이 아니다"와 "판정하지 못했다"를 겸하고 있었다.
+    FDR 소속부가 코스닥에만 있어 KOSPI 942종목이 전부 후자였는데 전자로 취급됐다.
+    """
+    _add_column_if_missing(conn, "listing", "is_managed_known", "INTEGER NOT NULL DEFAULT 0")
+    # 기존 값 중 신뢰할 수 있는 것은 소속부가 있던 종목(코스닥)뿐이다.
+    conn.execute(
+        "UPDATE listing SET is_managed_known = CASE "
+        "WHEN dept IS NOT NULL AND TRIM(dept) != '' THEN 1 ELSE 0 END"
+    )
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -286,6 +301,7 @@ _MIGRATIONS: dict[int, object] = {
     5: _migrate_v5,  # listing 컬럼 추가
     6: _migrate_v6,  # disclosures.disqualifying·resolving 추가 + 기존 행 재판정
     7: _migrate_v7,  # 업종 대분류 규칙 확장 → 기존 행 재분류
+    8: _migrate_v8,  # is_managed_known 분리 (판정 못한 것을 정상으로 두지 않는다)
 }
 
 
@@ -690,6 +706,20 @@ def tradable_codes(
         params.append(min_market_cap)
     sql += " ORDER BY market_cap DESC"
     return [r[0] for r in conn.execute(sql, params).fetchall()]
+
+
+def managed_unknown_count(conn: sqlite3.Connection, *, min_market_cap: float) -> int:
+    """관리종목 판정을 하지 못한 모집단 종목 수.
+
+    0이 아니면 그만큼은 "관리종목이 아니다"가 아니라 "모른다"이다.
+    이 구분을 팩에 싣지 않으면 판정 실패가 조용히 통과가 된다.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM listing WHERE is_preferred=0 AND is_spac=0 "
+        "AND market_cap IS NOT NULL AND market_cap >= ? AND is_managed_known = 0",
+        (min_market_cap,),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def universe_coverage(conn: sqlite3.Connection, *, min_market_cap: float) -> tuple[int, int]:

@@ -16,8 +16,10 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 
+from data import config as dcfg
 from decision import config
 
 log = logging.getLogger(__name__)
@@ -99,7 +101,9 @@ class UniverseResult:
 # ── 1단계: 하드 필터 ────────────────────────────────────
 
 
-def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
+def hard_filter(
+    conn: sqlite3.Connection, as_of: date, *, now: datetime | None = None
+) -> dict[str, Candidate]:
     """거래 자체가 불가능하거나 슬리피지가 전략을 삼키는 종목을 잘라낸다."""
     halt_since = (as_of - timedelta(days=config.HALT_LOOKBACK_DAYS)).isoformat()
 
@@ -111,10 +115,12 @@ def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
         WHERE l.is_preferred = 0
           AND l.is_spac = 0
           AND l.is_managed = 0
-          AND i.date = (SELECT MAX(date) FROM indicators WHERE code = l.code)
+          -- 시점 상한이 없으면 과거 시점 재현에서 미래 지표가 들어온다 (치명 C).
+          AND i.date = (SELECT MAX(date) FROM indicators WHERE code = l.code AND date <= ?)
           AND l.code NOT IN (SELECT DISTINCT code FROM delisting)
           AND l.code NOT IN (
-              SELECT DISTINCT code FROM ohlcv WHERE halted = 1 AND date >= ?
+              -- 상한이 없으면 '나중에 정지될 종목'을 미리 피하는 완벽한 미래 정보가 된다.
+              SELECT DISTINCT code FROM ohlcv WHERE halted = 1 AND date >= ? AND date <= ?
           )
           -- 배제는 기간 제한 없이 영구다(사용자 확정 정책). 되돌아올 길이 없으므로
           -- 카테고리가 아니라 dart.is_disqualifying() 이 방향까지 본 판정을 쓴다 —
@@ -126,14 +132,20 @@ def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
           -- 그 시작일은 data_quality.disclosures_since 로 팩에 실린다.
           AND l.code NOT IN (
               SELECT d.code FROM disclosures d
-              WHERE d.code IS NOT NULL AND d.disqualifying = 1
+              WHERE d.code IS NOT NULL AND d.disqualifying = 1 AND d.rcept_dt <= ?
               GROUP BY d.code
               HAVING MAX(d.rcept_dt) > COALESCE(
                   (SELECT MAX(r.rcept_dt) FROM disclosures r
-                   WHERE r.code = d.code AND r.resolving = 1), '')
+                   WHERE r.code = d.code AND r.resolving = 1 AND r.rcept_dt <= ?), '')
           )
         """,
-        (halt_since,),
+        (
+            as_of.isoformat(),
+            halt_since,
+            as_of.isoformat(),
+            as_of.strftime("%Y%m%d"),
+            as_of.strftime("%Y%m%d"),
+        ),
     ).fetchall()
 
     out: dict[str, Candidate] = {}
@@ -147,11 +159,11 @@ def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
 
         if (p.get("bars") or 0) < config.MIN_BARS:
             continue
-        adv = ind.get("adv20_bil_krw")
-        cap = ind.get("market_cap_bil_krw")
-        if adv is None or adv < config.MIN_ADV20_BIL_KRW:
+        adv = ind.get("adv20_eok_krw")
+        cap = ind.get("market_cap_eok_krw")
+        if adv is None or adv < config.MIN_ADV20_EOK_KRW:
             continue
-        if cap is None or cap < config.MIN_MARKET_CAP_BIL_KRW:
+        if cap is None or cap < config.MIN_MARKET_CAP_EOK_KRW:
             continue
 
         out[code] = Candidate(
@@ -164,7 +176,7 @@ def hard_filter(conn: sqlite3.Connection, as_of: date) -> dict[str, Candidate]:
 
 
 def _briefing_channel(
-    conn: sqlite3.Connection, pool: dict[str, Candidate], as_of: date, quota: int
+    conn: sqlite3.Connection, pool: dict[str, Candidate], as_of: date, quota: int, now: datetime
 ) -> list[tuple[str, str]]:
     """최근 브리핑에서 주목·조건부 관점을 받은 종목.
 
@@ -174,11 +186,16 @@ def _briefing_channel(
     since = (as_of - timedelta(days=config.BRIEFING_LOOKBACK_DAYS)).isoformat()
     order = {"상": 0, "중상": 1, "중": 2, "중하": 3, "하": 4, None: 5}
     rows = conn.execute(
-        f"""SELECT code, stance, confidence, day, kind FROM briefing_views
-            WHERE market='KR' AND code IS NOT NULL AND day >= ?
-              AND stance IN ({",".join("?" * len(config.BRIEFING_STANCES))})
-            ORDER BY day DESC""",
-        (since, *config.BRIEFING_STANCES),
+        f"""SELECT v.code, v.stance, v.confidence, v.day, v.kind
+            FROM briefing_views v JOIN briefings b ON b.briefing_id = v.briefing_id
+            WHERE v.market='KR' AND v.code IS NOT NULL AND v.day >= ?
+              -- 상한이 없으면 아직 발행되지 않은 브리핑으로 종목을 뽑는다.
+              -- pack.py 의 브리핑 블록은 이 상한을 걸고 있었으므로, 팩에는 없는 브리핑을
+              -- 근거로 유니버스에 오르는 모순이 생겼다 (점검 2026-08-23 치명 B).
+              AND b.published_at <= ?
+              AND v.stance IN ({",".join("?" * len(config.BRIEFING_STANCES))})
+            ORDER BY v.day DESC""",
+        (since, now.isoformat(timespec="seconds"), *config.BRIEFING_STANCES),
     ).fetchall()
 
     best: dict[str, tuple] = {}
@@ -218,10 +235,10 @@ def _flow_channel(pool: dict[str, Candidate], quota: int) -> list[tuple[str, str
         idd = f.get("inst_net_days") or 0
         if max(fd, idd) < config.FLOW_MIN_NET_DAYS:
             continue
-        cap = c.indicators.get("market_cap_bil_krw")
+        cap = c.indicators.get("market_cap_eok_krw")
         if not cap:
             continue
-        net = (f.get("foreign_net_5d_bil_krw") or 0) + (f.get("inst_net_5d_bil_krw") or 0)
+        net = (f.get("foreign_net_5d_eok_krw") or 0) + (f.get("inst_net_5d_eok_krw") or 0)
         if net <= 0:
             continue
         intensity = net / cap * 100
@@ -237,10 +254,20 @@ def _flow_channel(pool: dict[str, Candidate], quota: int) -> list[tuple[str, str
 
 
 def build(
-    conn: sqlite3.Connection, as_of: date, *, exclude: set[str] | None = None
+    conn: sqlite3.Connection,
+    as_of: date,
+    *,
+    now: datetime | None = None,
+    exclude: set[str] | None = None,
 ) -> UniverseResult:
-    """하드 필터 → 3채널 랭킹 → 합집합."""
-    pool = hard_filter(conn, as_of)
+    """하드 필터 → 3채널 랭킹 → 합집합.
+
+    `now` 는 "지금 몇 시인가" — 브리핑처럼 하루 안에서도 시점이 갈리는 입력의 상한이다.
+    주지 않으면 as_of 의 장 마감(23:59)으로 둔다.
+    """
+    if now is None:
+        now = datetime.combine(as_of, dtime(23, 59, 59), tzinfo=dcfg.KST)
+    pool = hard_filter(conn, as_of, now=now)
     warnings: list[str] = []
     passed = len(pool)
 
@@ -256,7 +283,7 @@ def build(
 
     picks: dict[str, Candidate] = {}
     for channel, fn in (
-        ("briefing", lambda q: _briefing_channel(conn, pool, as_of, q)),
+        ("briefing", lambda q: _briefing_channel(conn, pool, as_of, q, now)),
         ("momentum", lambda q: _momentum_channel(pool, q)),
         ("flow", lambda q: _flow_channel(pool, q)),
     ):
