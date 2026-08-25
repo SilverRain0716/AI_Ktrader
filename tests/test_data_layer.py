@@ -291,3 +291,78 @@ def test_분류_우선순위가_좁은_규칙_먼저다():
     groups = [g for g, _ in ls._SECTOR_GROUPS]
     assert groups.index("2차전지") < groups.index("기계·장비")
     assert groups.index("제약·바이오") < groups.index("화학")
+
+
+# ── 지표 정의 (점검 2026-08-23 F·G·H) ───────────────────
+
+
+def _bars(n=250, **over):
+    import pandas as pd
+
+    d = {
+        "date": pd.date_range("2025-01-01", periods=n).date,
+        "open": [10000] * n,
+        "high": [10000] * n,
+        "low": [10000] * n,
+        "close": [10000] * n,
+        "volume": [1000] * n,
+        "halted": [0] * n,
+    }
+    df = pd.DataFrame(d)
+    for k, (idx, val) in over.items():
+        df.loc[idx, k] = val
+    return df
+
+
+def test_52주고가는_장중_고가를_쓴다():
+    """종가 최댓값을 쓰면 장중에만 찍은 고가를 놓친다. max(close) <= max(high) 이므로
+    오차가 항상 한 방향 — 갭이 0에 가깝게 나와 '신고가 근접' 위양성이 된다."""
+    from data import indicators as I
+
+    r = I.compute(_bars(high=(100, 20000)), market_cap_krw=1e12, benchmark=None)
+    assert r.high_52w_gap_pct == pytest.approx(-50.0), r.high_52w_gap_pct
+
+
+def test_봉이_부족하면_52주라_부르지_않는다():
+    from data import indicators as I
+
+    r = I.compute(_bars(n=150), market_cap_krw=1e12, benchmark=None)
+    assert r.high_52w_gap_pct is None
+
+
+def test_거래량비율은_당일을_분모에_넣지_않는다():
+    """당일을 포함하면 급증이 축소된다 — 10배가 6.9배로 읽힌다."""
+    from data import indicators as I
+
+    r = I.compute(_bars(volume=(249, 10000)), market_cap_krw=1e12, benchmark=None)
+    assert r.volume_ratio == pytest.approx(10.0), r.volume_ratio
+
+
+def test_단위_필드명이_값과_일치한다():
+    """`_bil_krw` 는 billion(10억)인데 값은 억원이었다. 소비자가 LLM 이라 이름대로 읽는다."""
+    from data import indicators as I
+
+    r = I.compute(_bars(), market_cap_krw=1_000_000_000_000, benchmark=None)
+    assert r.market_cap_eok_krw == pytest.approx(10_000)  # 1조 = 10,000억
+    assert not hasattr(r, "market_cap_bil_krw")
+
+
+# ── 관리종목 판정 (점검 2026-08-23 치명 D) ──────────────
+
+
+def test_소속부로_관리종목과_투자주의환기를_잡는다():
+    from data.sources import listing as ls
+
+    assert ls.is_managed_dept("관리종목(소속부없음)") is True
+    assert ls.is_managed_dept("투자주의환기종목(소속부없음)") is True
+    assert ls.is_managed_dept("우량기업부") is False
+    assert ls.is_managed_dept(None) is False
+    assert ls.is_managed_dept("") is False
+
+
+def test_KOSPI는_소속부가_없어_이_신호만으로는_판정할_수_없다():
+    """FDR 소속부는 코스닥 전용이다 — KOSPI 942종목이 전부 결측이라
+    is_managed 가 코스닥 전용 필터로 조용히 동작했다. 네이버와 합집합이어야 한다."""
+    from data.sources import listing as ls
+
+    assert ls.is_managed_dept(None) is False  # KOSPI 의 실제 값
