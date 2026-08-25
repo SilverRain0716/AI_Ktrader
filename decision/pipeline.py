@@ -39,6 +39,12 @@ def task_build(
 
     try:
         p = pack.build(conn, cycle=cycle, event_trigger=event)
+    except config.RiskLimitError as e:
+        # RiskLimitError 는 PackRefused 의 하위다 — 아래보다 먼저 잡아야 구분이 된다.
+        # 종료 코드를 나눈다: 3 = 설정 문제(사람이 .env 를 고쳐야 한다),
+        #                     1 = 데이터 문제(배치를 돌리면 해결될 수 있다).
+        log.error("리스크 한도 설정 오류 — 팩을 만들지 않는다: %s", e)
+        return 3
     except pack.PackRefused as e:
         log.error("팩 생성 거부 — %s", e)
         return 1
@@ -92,7 +98,17 @@ def task_status(conn) -> int:
     print(
         f"   하드 필터: 거래대금 ≥ {config.MIN_ADV20_EOK_KRW:.0f}억 / 시총 ≥ {config.MIN_MARKET_CAP_EOK_KRW:.0f}억"
     )
-    print(f"   리스크 한도: {config.constraints()}")
+    limits_ok = True
+    try:
+        print(f"   리스크 한도: {config.constraints()}")
+        print(f"   페이퍼 시드: {config.account_seed()['total_equity_krw']:,}원")
+    except config.RiskLimitError as e:
+        # status 는 진단용이다. 한도가 없다고 여기서 죽으면 무엇이 없는지 볼 수 없다.
+        # 다만 종료 코드는 실패여야 한다 — 항상 0 을 주는 점검은 아무것도 점검하지 않는다.
+        limits_ok = False
+        print(f"   리스크 한도: ✗ {e}")
+        for item in config.missing_limits():
+            print(f"      · {item}")
 
     print("\n── 보유 포지션 ──")
     rows = conn.execute(
@@ -102,7 +118,7 @@ def task_status(conn) -> int:
         print("   없음")
     for c, nm, q, a, o in rows:
         print(f"   {c} {nm or '':<12} {q:>6}주 @{a:>9,}  {o[:10]}")
-    return 0
+    return 0 if limits_ok else 3
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -25,8 +25,10 @@ log = logging.getLogger(__name__)
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "context_pack.schema.json"
 
 
-class PackRefused(RuntimeError):
-    """입력이 판단에 쓸 수 없는 상태다. AI를 호출하지 않는다."""
+# PackRefused 는 decision.config 에 정의돼 있다 — config 가 pack 을 import 할 수 없어
+# RiskLimitError 를 그 하위로 두려면 부모가 아래쪽에 있어야 했다.
+# 기존 `from decision.pack import PackRefused` 는 그대로 동작한다.
+PackRefused = config.PackRefused
 
 
 def _validator() -> Draft202012Validator:
@@ -293,6 +295,11 @@ def build(
     now = generated_at or datetime.now(dcfg.KST)
     as_of = now.date()
 
+    # 설정 검증을 맨 앞에 둔다. 공짜로 확인되는 오류를 데이터 검사 뒤로 미루면
+    # 사용자는 느린 검사를 다 통과한 뒤에야 .env 오타를 알게 된다.
+    constraints = config.constraints()
+    seed = config.account_seed()
+
     if not conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]:
         raise PackRefused(
             "종목 마스터가 비어 있다. `python -m data.pipeline listing` 을 먼저 실행하라."
@@ -303,7 +310,6 @@ def build(
     # 절단된 모수 위에서 랭킹하면 "상위 60종목"이 상위가 아니게 된다 (결함 2).
     coverage = check_coverage(conn)
 
-    seed = config.account_seed()
     # 회계 항등식으로 계산한다. total_equity 를 상수로 두면 실현손실이 계좌에서 사라지고,
     # 평가금을 빼서 현금을 구하면 손실이 매수 여력으로 둔갑한다 (치명 A).
     acct = positions.account_state(conn, seed["total_equity_krw"])
@@ -322,8 +328,23 @@ def build(
     dq = _data_quality(conn, as_of, briefings, cycle, ohlcv_as_of, coverage)
     dq["warnings"].extend(uni.warnings)
 
-    constraints = config.constraints()
     limit = constraints.get("daily_loss_limit_krw") or 0
+    # 종목수 × 종목비중이 100%에 못 미치는 것 자체는 정상이다 — 현금을 남기려는 의도일 수 있고,
+    # 8종목 × 12% = 96% 같은 조합은 흔하다. 진짜 설정 실수(20종목 × 0.1% = 2%)만 잡도록
+    # 임계를 충분히 낮게 둔다. 이 경고는 data_quality 에 실려 warning_count 를 올리므로,
+    # 정상 설정에서 상시로 켜지면 데이터 결손 신호를 희석시킨다.
+    deployable = constraints["max_positions"] * constraints["max_weight_pct_per_name"]
+    if deployable < config.MIN_DEPLOYABLE_PCT:
+        dq["warnings"].append(
+            f"한도 조합상 최대 투입 가능 비중이 {deployable:.0f}% — 자본의 절반도 쓸 수 없는 설정이다. "
+            "단위를 확인하라"
+        )
+    if not limit:
+        # 0 은 이제 명시적 선택이다(환경변수 필수화). 다만 '한도를 껐다'는 사실 자체가
+        # 팩 안에서 보이지 않으면, AI 는 한도가 지켜지고 있다고 가정한다.
+        dq["warnings"].append(
+            "일일 손실 한도가 0 — 비활성 상태다. 손실이 얼마가 나든 신규 진입이 차단되지 않는다"
+        )
 
     stamp = now.strftime("%Y%m%d-%H%M")
     pack: dict = {
