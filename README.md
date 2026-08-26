@@ -116,6 +116,10 @@ DB는 `data/warehouse/market.db` (gitignore). `AIK_DATA_DIR`로 위치를 바꿀
 
 ### 브리핑·판단 계층
 
+리스크 한도는 **기본값이 없다**([ADR 0004](docs/adr/0004-repo-visibility.md)). 판단 계층을 돌리기 전에
+`.env.example` 을 `.env` 로 복사해 `AIK_*` 8개를 채워야 한다. 하나라도 비어 있거나, 숫자가 아니거나,
+허용 범위를 벗어나면 **팩 생성이 거부된다.** 무엇이 빠졌는지는 `decision.pipeline status` 가 한 번에 알려준다.
+
 ```bash
 python -m briefing.pipeline sync        # GitLab 아카이브 → 구조화 (reparse 자동 실행)
 python -m briefing.pipeline map-codes   # 종목명 → 6자리 코드
