@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from data import env as _env  # noqa: F401  (.env 로딩)
+
 # ── GitLab 저장소 ────────────────────────────────────────
 GITLAB_HOST = os.getenv("BRIEFING_GITLAB_HOST", "https://gitlab.com")
 GITLAB_PROJECT = os.getenv("BRIEFING_GITLAB_PROJECT", "SilverRain0716/briefings")

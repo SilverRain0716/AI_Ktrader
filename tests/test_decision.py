@@ -9,12 +9,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from data import config as dcfg
 from data import store
 from decision import config, pack, positions, universe
+
+SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
 
 AS_OF = date(2026, 8, 20)
 NOW = datetime(2026, 8, 20, 8, 20, tzinfo=dcfg.KST)
@@ -824,3 +827,205 @@ def test_관리종목_판정_불가는_경고로_드러난다(db):
     db.execute("UPDATE listing SET is_managed_known=1")
     p2 = pack.build(db, cycle="premarket", generated_at=NOW)
     assert not any("판정 불가" in w for w in p2["data_quality"]["warnings"])
+
+
+# ── 리스크 한도 환경변수 ────────────────────────────────
+# 예전에는 기본값이 코드에 박혀 있었고, .env.example 에는 AIK_* 가 하나도 없었다.
+# 그래서 아무도 설정하지 않은 채 초안 값으로 돌고 있었고, 그 사실이 드러나지 않았다.
+# 아래 네 가지가 각각 그 상태로 되돌아가는 경로를 막는다.
+
+
+def _read_all_limits() -> None:
+    """한도 8개를 전부 읽는다. 어느 항목이 빠져도 여기서 걸린다."""
+    config.constraints()
+    config.account_seed()
+
+
+def test_스키마와_코드의_경계가_같다():
+    """범위가 두 곳에 있다. 한쪽만 고치면 계약과 구현이 조용히 갈라진다."""
+    schema = json.loads((SCHEMA_DIR / "context_pack.schema.json").read_text(encoding="utf-8"))
+    props = schema["properties"]["constraints"]["properties"]
+    for env_name, (_, lo, hi, _label) in config._LIMIT_SPECS.items():
+        if env_name == "AIK_PAPER_EQUITY_KRW":
+            continue  # 시드는 account 블록이고 스키마에 경계를 두지 않는다
+        key = env_name.removeprefix("AIK_").lower()
+        key = {"max_new_entries_per_cycle": "max_new_entries_this_cycle"}.get(key, key)
+        assert props[key]["minimum"] == lo, key
+        assert props[key]["maximum"] == hi, key
+    # 7개 전부가 필수여야 한다 — 하나라도 빠지면 그 항목을 지워도 팩이 통과한다.
+    assert set(schema["properties"]["constraints"]["required"]) == set(props) - {
+        "daily_loss_limit_hit",
+        "blocked_codes",
+    }
+
+
+@pytest.mark.parametrize("name", list(config._LIMIT_SPECS))
+def test_한도가_없으면_예외다(monkeypatch, name):
+    """설정 누락은 조용한 폴백이 아니라 정지다. 8개 전부를 각각 확인한다."""
+    monkeypatch.delenv(name)
+    with pytest.raises(config.RiskLimitError) as e:
+        _read_all_limits()
+    assert name in str(e.value)
+    # 사람이 읽고 바로 고칠 수 있어야 한다.
+    assert ".env" in str(e.value)
+
+
+@pytest.mark.parametrize("name", list(config._LIMIT_SPECS))
+def test_빈_문자열도_미설정으로_본다(monkeypatch, name):
+    """.env.example 은 8개를 전부 `AIK_X=` 로 내보낸다 — 복사만 하고 안 채운 상태가
+    가장 흔한 실패다. 이건 '설정됨'이 아니라 '미설정'이어야 한다."""
+    monkeypatch.setenv(name, "   ")
+    with pytest.raises(config.RiskLimitError) as e:
+        _read_all_limits()
+    # '읽을 수 없다'(파싱 실패)가 아니라 '설정되지 않았다'로 걸려야 한다.
+    # 이 단정이 없으면 공백 처리를 지워도 테스트가 통과한다.
+    assert "설정되지 않았다" in str(e.value)
+    assert name in str(e.value)
+
+
+def test_숫자가_아니면_예외다(monkeypatch):
+    """`여덟` 을 넣으면 예전에는 조용히 8 로 돌아갔다. 설정한 줄 알았는데 아니었다."""
+    monkeypatch.setenv("AIK_MAX_POSITIONS", "여덟")
+    with pytest.raises(config.RiskLimitError) as e:
+        config.constraints()
+    assert "여덟" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("AIK_MAX_WEIGHT_PCT_PER_NAME", "1200"),  # 12.00 의 소수점 실수
+        ("AIK_MAX_POSITIONS", "0"),  # 한 종목도 못 사는 설정
+        ("AIK_MAX_POSITIONS", "500"),  # 사실상 한도 없음
+        ("AIK_MAX_RISK_PCT_PER_TRADE", "50"),  # 1회에 계좌의 절반
+        ("AIK_DAILY_LOSS_LIMIT_KRW", "-1000"),  # 부호 실수
+    ],
+)
+def test_범위를_벗어난_값은_예외다(monkeypatch, name, value):
+    """숫자로 읽히기만 하면 통과하던 구간. 단위·소수점·부호 실수를 여기서 끊는다."""
+    monkeypatch.setenv(name, value)
+    with pytest.raises(config.RiskLimitError) as e:
+        config.constraints()
+    msg = str(e.value)
+    assert name in msg
+    # '미설정' 메시지에도 변수명이 들어 있다. 범위 위반으로 걸린 것임을 구분해야
+    # 범위 검사를 지워도 통과하는 테스트가 되지 않는다.
+    assert "허용 범위를 벗어났다" in msg
+
+
+def test_페이퍼_시드도_필수다(monkeypatch):
+    """가상 자금이어도 자금 규모다 (ADR 0004). 1억이 코드에 박혀 있었다."""
+    monkeypatch.delenv("AIK_PAPER_EQUITY_KRW")
+    with pytest.raises(config.RiskLimitError):
+        config.account_seed()
+
+
+def test_missing_limits_는_빠진_항목을_전부_알려준다(monkeypatch):
+    """하나씩 고쳐가며 재실행하지 않아도 되게, 진단은 한 번에 다 준다."""
+    monkeypatch.delenv("AIK_MAX_POSITIONS")
+    monkeypatch.setenv("AIK_MAX_RISK_PCT_PER_TRADE", "99")
+    missing = config.missing_limits()
+    assert "AIK_MAX_POSITIONS" in missing
+    assert "AIK_MAX_RISK_PCT_PER_TRADE" in missing
+    assert "AIK_MAX_WEIGHT_PCT_PER_NAME" not in missing
+
+
+def test_한도_없이는_팩을_만들지_않는다(db, monkeypatch):
+    """한도 없이 만든 팩은 AI 에게 '제한이 없다'고 말하는 것과 같다."""
+    monkeypatch.delenv("AIK_MAX_POSITIONS")
+    with pytest.raises(config.RiskLimitError):
+        pack.build(db, cycle="premarket", generated_at=NOW)
+
+
+def test_손실한도_0은_경고로_드러난다(db, monkeypatch):
+    """0 은 명시적 선택이지만, '한도를 껐다'는 사실이 팩 안에서 보여야 한다."""
+    monkeypatch.setenv("AIK_DAILY_LOSS_LIMIT_KRW", "0")
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert any("일일 손실 한도가 0" in w for w in p["data_quality"]["warnings"])
+
+    monkeypatch.setenv("AIK_DAILY_LOSS_LIMIT_KRW", "1000000")
+    p2 = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert not any("일일 손실 한도가 0" in w for w in p2["data_quality"]["warnings"])
+    assert p2["constraints"]["daily_loss_limit_krw"] == 1_000_000
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "８",  # 전각 숫자 — int() 는 조용히 받는다
+        "٨",  # 아랍-인도 숫자 — 마찬가지
+        "1_0",  # 자릿수 구분 언더바. 손으로 고치는 .env 에서 10 이 되면 사고다
+        "8.0",  # 정수 칸에 소수점
+        "1e9",  # 지수 표기
+    ],
+)
+def test_사람이_쓴_숫자처럼_보이지만_아닌_값은_거부한다(monkeypatch, raw):
+    """파이썬의 int()/float() 는 이것들을 전부 조용히 받아들인다.
+
+    설정 파일에서 `1_0` 이 10 으로 읽히는 것은 오타가 통과하는 것이지 관대함이 아니다.
+    """
+    monkeypatch.setenv("AIK_MAX_POSITIONS", raw)
+    with pytest.raises(config.RiskLimitError) as e:
+        config.constraints()
+    assert "읽을 수 없다" in str(e.value)
+
+
+def test_항목은_멀쩡한데_조합이_모순이면_거부한다(monkeypatch):
+    """범위 검사는 한 칸씩만 본다. 두 칸의 어긋남이 실제로는 더 흔하다."""
+    # 종목 비중 상한 > 섹터 비중 상한 — 한 종목이 자기 섹터에조차 못 들어간다
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_NAME", "40.0")
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_SECTOR", "30.0")
+    with pytest.raises(config.RiskLimitError, match="자기 섹터"):
+        config.constraints()
+
+    # 들어갈 자리보다 많이 사려는 설정
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_NAME", "12.0")
+    monkeypatch.setenv("AIK_MAX_POSITIONS", "2")
+    monkeypatch.setenv("AIK_MAX_NEW_ENTRIES_PER_CYCLE", "5")
+    with pytest.raises(config.RiskLimitError, match="들어갈 자리"):
+        config.constraints()
+
+
+def test_조합_모순도_missing_limits_가_알려준다(monkeypatch):
+    """개별 항목이 다 멀쩡하면 진단이 빈 목록을 주던 구간."""
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_NAME", "40.0")
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_SECTOR", "30.0")
+    bad = config.missing_limits()
+    assert bad and "조합 모순" in bad[0]
+
+
+def test_자릿수가_다른_한도_조합은_경고로_드러난다(db, monkeypatch):
+    """오류는 아니다 — 현금을 남기려는 의도일 수 있다. 다만 자릿수가 틀린 건 보여야 한다."""
+    monkeypatch.setenv("AIK_MAX_POSITIONS", "20")
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_NAME", "0.5")  # 20 × 0.5 = 10%
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert any("절반도 쓸 수 없는" in w for w in p["data_quality"]["warnings"])
+
+    # 8 × 12 = 96%. 현금 4%를 남기는 평범한 설정이다 — 경고가 뜨면 안 된다.
+    # 정상 설정에서 상시로 켜지는 경고는 data_quality 를 오염시킨다.
+    monkeypatch.setenv("AIK_MAX_POSITIONS", "8")
+    monkeypatch.setenv("AIK_MAX_WEIGHT_PCT_PER_NAME", "12.0")
+    p2 = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert not any("쓸 수 없는" in w for w in p2["data_quality"]["warnings"])
+
+
+def test_손실한도는_실제로_걸린다(db, monkeypatch):
+    """`daily_loss_limit_hit` 은 한때 하드코딩 상수였다. 지금은 실제 실현손익을 본다.
+
+    conftest 가 한도를 0(비활성)으로 고정하고 있어 이 경로는 테스트에 잡히지 않고 있었다.
+    """
+    monkeypatch.setenv("AIK_DAILY_LOSS_LIMIT_KRW", "1000000")
+    today = NOW.date().isoformat()
+    db.execute(
+        "INSERT INTO paper_positions (code,name,qty,avg_price,opened_at,closed_at,"
+        "exit_price,exit_reason,realized_pnl_krw) "
+        "VALUES ('005930','삼성전자',10,70000,?,?,60000,'STOP',-1500000)",
+        (today, today),
+    )
+    p = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert p["constraints"]["daily_loss_limit_hit"] is True
+
+    # 한도를 손실보다 크게 잡으면 걸리지 않는다 — 상수가 아니라 비교의 결과다.
+    monkeypatch.setenv("AIK_DAILY_LOSS_LIMIT_KRW", "9000000")
+    p2 = pack.build(db, cycle="premarket", generated_at=NOW)
+    assert p2["constraints"]["daily_loss_limit_hit"] is False
