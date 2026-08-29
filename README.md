@@ -117,7 +117,7 @@ python -m data.pipeline daily              # 운영 배치 (KST 18:30 이후)
 
 DB는 `data/warehouse/market.db` (gitignore). `AIK_DATA_DIR`로 위치를 바꿀 수 있다.
 
-적재 대상은 **개수가 아니라 시총 하한**으로 정한다(`INGEST_MIN_MARKET_CAP_BIL_KRW`).
+적재 대상은 **개수가 아니라 시총 하한**으로 정한다(`INGEST_MIN_MARKET_CAP_EOK_KRW`).
 `--limit` 는 시험용이며, 쓰면 유니버스 모집단에 구멍이 생긴다.
 `status` 가 모집단 대비 커버리지를 표시하고, 95% 미만이면 컨텍스트 팩이 경고를,
 70% 미만이면 팩 생성을 거부한다.
@@ -128,7 +128,7 @@ DB는 `data/warehouse/market.db` (gitignore). `AIK_DATA_DIR`로 위치를 바꿀
 ### 브리핑·판단 계층
 
 리스크 한도는 **기본값이 없다**([ADR 0004](docs/adr/0004-repo-visibility.md)). 판단 계층을 돌리기 전에
-`.env.example` 을 `.env` 로 복사해 `AIK_*` 8개를 채워야 한다. 하나라도 비어 있거나, 숫자가 아니거나,
+`.env.example` 을 `.env` 로 복사해 `AIK_*`(리스크 한도 7개 + 페이퍼 시드 1개)를 채워야 한다. 하나라도 비어 있거나, 숫자가 아니거나,
 허용 범위를 벗어나면 **팩 생성이 거부된다.** 무엇이 빠졌는지는 `decision.pipeline status` 가 한 번에 알려준다.
 
 ```bash
