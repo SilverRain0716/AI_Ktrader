@@ -304,7 +304,7 @@ premarket(08:20)에서 새 정보인 `kr-close-deep` 은 **전일 18:00** 발행
 세 군데를 고쳤다.
 
 1. **적재 대상을 개수가 아니라 시총 하한으로 정의한다.**
-   `data.config.INGEST_MIN_MARKET_CAP_BIL_KRW` 가 하드 필터의 시총 하한과 **같은 값이어야 한다**는
+   `data.config.INGEST_MIN_MARKET_CAP_EOK_KRW` 가 하드 필터의 시총 하한과 **같은 값이어야 한다**는
    등식을 테스트로 고정했다. 이 등식이 커버리지 지표가 의미를 갖는 유일한 근거다.
    `--limit` 는 시험용으로만 남기고, 쓰면 "잘림"을 로그에 남긴다.
 
