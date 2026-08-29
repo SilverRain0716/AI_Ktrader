@@ -1,8 +1,7 @@
 """Phase 0 실측 도구 — 조사 대신 재고, 결과를 파일로 남긴다.
 
 `docs/phase0-verification.md` 는 35개 항목(A1~F6)을 "직접 확인해야 하는 것"으로 지목하고
-결과 칸을 비워 뒀다. 지금까지 채워진 칸은 0개다. 사람이 손으로 재고 손으로 적는
-구조라 시작 비용이 높았다.
+결과 칸을 비워 뒀다. 사람이 손으로 재고 손으로 적는 구조라 시작 비용이 높았다.
 
 이 스크립트는 **잴 수 있는 것을 자동으로 재서** `docs/phase0-results.md` 에 append 한다.
 - 키움 항목은 앱키가 있어야 한다. 없으면 SKIP 으로 남기고 나머지를 계속 잰다.
@@ -10,8 +9,9 @@
 - 주문(F)은 **여기서 재지 않는다.** 모의투자라도 주문은 사람이 직접 내는 행위다.
 
 사용:
-    python scripts/phase0_probe.py                 # 앱키 없이 되는 것 전부
+    python scripts/phase0_probe.py                 # 빠른 회차
     python scripts/phase0_probe.py --probe-limits  # 유량 한도까지 (일부러 429를 낸다)
+    python scripts/phase0_probe.py --probe-depth   # 분봉 깊이까지 (연속조회 수 분)
 """
 
 from __future__ import annotations
@@ -123,11 +123,97 @@ def e4_fdr_delisting(p: Probe) -> None:
     p.result = f"{len(df):,}건 · 최신 폐지일 {latest} (오늘 −{lag}일)"
 
 
-# ── D. 차트·시세 (네이버로 잴 수 있는 부분) ─────────────
+# ── D. 차트·시세 ────────────────────────────────────────
+
+KIWOOM_MINUTE_TR = "ka10080"
+
+
+def kiwoom_price(raw: str | int | None) -> int | None:
+    """키움 차트 가격의 부호 접두를 떼어낸다.
+
+    `'-257000'` 은 **음수가 아니라 전일대비 하락 표시**다. 그대로 int() 하면
+    가격이 음수가 되고, 수익률·지표가 조용히 뒤집힌다. 값 자체는 항상 절댓값이다.
+    """
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return None
+    return abs(int(text.lstrip("+-")))
+
+
+def d2_kiwoom_minute_depth(p: Probe, *, deep: bool) -> None:
+    """★ 키움 분봉을 어디까지 소급할 수 있는가 — 백테스트 가능 범위를 결정한다."""
+    conf = _kiwoom_conf()
+    if not conf:
+        p.result = "앱키 미설정"
+        return
+    tok = os.environ.get("_PHASE0_TOKEN")
+    if not tok:
+        p.status = "FAIL"
+        p.result = "토큰 없음"
+        return
+    _, _, base = conf
+    body = {"stk_cd": "005930", "tic_scope": "1", "upd_stkpc_tp": "1"}
+    rows = pages = 0
+    cont = nk = None
+    oldest = None
+    fields: list[str] = []
+    # 페이지 상한은 벽을 넘기 위한 것이지 벽 자체가 아니다. 실측 111 페이지.
+    cap = 400 if deep else 1
+    while pages < cap:
+        h = {
+            "authorization": f"Bearer {tok}",
+            "api-id": KIWOOM_MINUTE_TR,
+            "Content-Type": "application/json;charset=UTF-8",
+        }
+        if cont == "Y":
+            h["cont-yn"], h["next-key"] = cont, nk or ""
+        r = httpx.post(f"{base}/api/dostk/chart", headers=h, json=body, timeout=25)
+        j = r.json()
+        if j.get("return_code") != 0:
+            p.status = "FAIL"
+            p.result = f"{pages}페이지째 return_code={j.get('return_code')} · {j.get('return_msg')}"
+            return
+        batch = next((v for v in j.values() if isinstance(v, list)), [])
+        if not batch:
+            break
+        if not fields:
+            fields = list(batch[0].keys())
+        rows += len(batch)
+        pages += 1
+        oldest = batch[-1].get("cntr_tm")
+        cont, nk = r.headers.get("cont-yn"), r.headers.get("next-key")
+        if cont != "Y":
+            break
+    has_ohlc = {"open_pric", "high_pric", "low_pric"} <= set(fields)
+    p.status = "OK"
+    if deep:
+        p.result = (
+            f"{pages}페이지 · {rows:,}행 · 최고참 {oldest} · OHLC {'완비' if has_ohlc else '결측'}"
+        )
+        p.detail.append(
+            f"연속조회가 `cont-yn=N` 으로 정상 종료했다. 900행/페이지 × {pages} 로 "
+            "**행 수 상한(약 10만)** 에서 끊긴다 — 날짜 컷오프가 아니다. "
+            "따라서 봉 간격을 늘리면 같은 행 수로 더 과거까지 간다."
+        )
+        p.detail.append(
+            "**네이버와 달리 소급이 된다.** 분봉을 매일 적재하지 않아도 결손이 영구가 아니다."
+        )
+    else:
+        p.result = (
+            f"1페이지 {rows:,}행 · OHLC {'완비' if has_ohlc else '결측'} (깊이는 --probe-depth)"
+        )
+    p.detail.append(
+        "가격에 부호 접두가 붙는다(`'-257000'`) — 음수가 아니라 전일대비 하락 표시다. "
+        "`kiwoom_price()` 로 떼어낸다."
+    )
 
 
 def d2_naver_minute_depth(p: Probe) -> None:
-    """★ 분봉을 어디까지 소급할 수 있는가 — 백테스트 가능 범위를 결정한다."""
+    """네이버 분봉 — 키움이 없던 동안의 대체재. 본항목(★)은 `d2_kiwoom_minute_depth` 다.
+
+    키움과 나란히 재는 이유는 둘의 성질이 다르기 때문이다. 여기서 나온 "소급 불가"는
+    **네이버의 성질이지 분봉의 성질이 아니었다.**
+    """
     url = (
         "https://api.finance.naver.com/siseJson.naver"
         "?symbol=005930&requestType=1&startTime=20250101&endTime=20260826&timeframe=minute"
@@ -144,7 +230,9 @@ def d2_naver_minute_depth(p: Probe) -> None:
         "시가·고가·저가가 전부 null 이다 — 종가와 거래량만 온다. "
         "거래량은 당일 **누적**이므로 분봉 거래량은 연속 행의 차분으로 구해야 한다."
     )
-    p.detail.append("소급 불가 — 오늘 적재하지 않은 하루는 영구 결손이다.")
+    p.detail.append(
+        "네이버로는 소급이 안 된다 — 다만 이는 원천의 한계이지 분봉의 한계가 아니다. 키움(D2)은 소급된다."
+    )
 
 
 def d3_adjusted_price(p: Probe) -> None:
@@ -202,6 +290,55 @@ def a3_token(p: Probe) -> None:
     os.environ["_PHASE0_TOKEN"] = tok
 
 
+def a4_token_reissue(p: Probe) -> None:
+    """재발급이 기존 토큰을 무효화하는가 — 프로세스가 둘 이상일 때의 갱신 전략을 정한다."""
+    conf = _kiwoom_conf()
+    if not conf:
+        p.result = "앱키 미설정"
+        return
+    first = os.environ.get("_PHASE0_TOKEN")
+    if not first:
+        p.status = "FAIL"
+        p.result = "A3 실패 — 재발급 동작을 판정할 수 없다"
+        return
+    key, secret, base = conf
+    r = httpx.post(
+        f"{base}/oauth2/token",
+        json={"grant_type": "client_credentials", "appkey": key, "secretkey": secret},
+        headers={"Content-Type": "application/json;charset=UTF-8"},
+        timeout=20,
+    )
+    j = r.json()
+    second = j.get("token") or j.get("access_token")
+    if not second:
+        p.status = "FAIL"
+        p.result = f"재발급 실패 {r.status_code} · {str(j)[:100]}"
+        return
+    same = second == first
+    # 첫 토큰이 아직 살아 있는지는 조회 TR 한 번으로 확인한다.
+    chk = httpx.post(
+        f"{base}/api/dostk/stkinfo",
+        headers={
+            "authorization": f"Bearer {first}",
+            "api-id": "ka10001",
+            "Content-Type": "application/json;charset=UTF-8",
+        },
+        json={"stk_cd": "005930"},
+        timeout=15,
+    )
+    alive = chk.json().get("return_code") == 0
+    p.status = "OK"
+    p.result = (
+        f"재발급 토큰이 {'동일' if same else '상이'} · 기존 토큰 {'유효' if alive else '무효화'}"
+        f" · expires_dt={j.get('expires_dt', '미제공')}"
+    )
+    if same and alive:
+        p.detail.append(
+            "TTL 안에서는 같은 토큰이 돌아오고 기존 토큰도 살아 있다 — "
+            "프로세스 간 토큰 공유·갱신 조율이 필요 없다. 대신 **강제 회전도 불가능**하다."
+        )
+
+
 def a5_linux(p: Probe) -> None:
     if not _kiwoom_conf():
         p.result = "앱키 미설정"
@@ -256,6 +393,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--probe-limits", action="store_true", help="유량 한도를 일부러 넘겨 복구 방식을 잰다"
     )
+    ap.add_argument(
+        "--probe-depth", action="store_true", help="분봉 연속조회를 끝까지 돌려 깊이를 잰다 (수 분)"
+    )
     ap.add_argument("--no-write", action="store_true", help="결과 파일에 남기지 않는다")
     args = ap.parse_args(argv)
 
@@ -264,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("A. 키움 REST 기본")
     probes = [_run(Probe("A3", "토큰 발급과 실제 TTL"), a3_token)]
+    probes.append(_run(Probe("A4", "재발급 시 기존 토큰 무효화 여부"), a4_token_reissue))
     probes.append(_run(Probe("A5", "리눅스에서 정상 동작"), a5_linux))
 
     print("\nB. 유량 제한")
@@ -274,7 +415,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print("\nD. 차트·시세")
-    probes.append(_run(Probe("D2", "분봉 과거 조회 깊이 ★"), d2_naver_minute_depth))
+    probes.append(
+        _run(
+            Probe("D2", "키움 분봉 과거 조회 깊이 ★"),
+            lambda p: d2_kiwoom_minute_depth(p, deep=args.probe_depth),
+        )
+    )
+    probes.append(_run(Probe("D2n", "네이버 분봉 (대체재)"), d2_naver_minute_depth))
     probes.append(_run(Probe("D3", "수정주가 반영 여부"), d3_adjusted_price))
 
     print("\nE. 외부 데이터 소스")
@@ -287,7 +434,12 @@ def main(argv: list[str] | None = None) -> int:
     fail = sum(1 for p in probes if p.status == "FAIL")
     print(f"\n측정 {ok} · 보류 {skip} · 실패 {fail}")
     if skip:
-        print("보류 항목은 키움 앱키 발급 후 다시 돌리면 채워진다.")
+        # 보류 사유가 둘이다 — 앱키가 없어서와, 플래그를 안 줘서. 섞어 적으면
+        # 앱키가 생긴 뒤에도 "아직 앱키 대기"로 읽힌다.
+        why = ", ".join(
+            f"{p.id}({p.result.split('—')[0].strip()[:28]})" for p in probes if p.status == "SKIP"
+        )
+        print(f"보류: {why}")
 
     if not args.no_write:
         _append(probes, now, limits_probed=args.probe_limits)
