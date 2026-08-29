@@ -20,7 +20,9 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import pairwise
@@ -370,38 +372,194 @@ def a5_linux(p: Probe) -> None:
     p.result = f"{sys.platform} / Python {sys.version.split()[0]} 에서 토큰 발급 성공"
 
 
-def b1_rate_limit(p: Probe, *, enabled: bool) -> None:
-    """문서상 초당 5회. 실제로 어떻게 카운트되고 어떻게 복구되는가."""
+# ── B. 유량 제한 ────────────────────────────────────────
+#
+# 순차 호출로는 잴 수 없다. 해외 라우팅 RTT 가 0.9초라 10회를 순서대로 보내면
+# 8.9초에 걸쳐 도착해 **초당 한도에 닿지도 못한다.** 그런데 10회 전부 200 이므로
+# "통과"로 읽힌다. 그것이 이 저장소가 반복해 당한 실패 방식 그대로다 —
+# 시험이 성립하지 않은 것과 시험을 통과한 것은 겉으로 구분되지 않는다.
+#
+# 그래서 두 가지를 강제한다.
+#   1. 연결을 미리 세운다 — TLS 핸드셰이크가 요청을 흩뿌려 동시성을 깨뜨린다
+#   2. Barrier 로 같은 순간에 출발시킨다
+
+RATE_TR = {  # api-id → (경로, 바디)
+    "ka10001": ("/api/dostk/stkinfo", {"stk_cd": "005930"}),
+    "ka10080": ("/api/dostk/chart", {"stk_cd": "005930", "tic_scope": "1", "upd_stkpc_tp": "1"}),
+}
+
+
+def _rate_headers(tok: str, tr: str) -> dict[str, str]:
+    return {
+        "authorization": f"Bearer {tok}",
+        "api-id": tr,
+        "Content-Type": "application/json;charset=UTF-8",
+    }
+
+
+def _warm(base: str, tok: str, trs: list[str]) -> list[tuple[httpx.Client, str]]:
+    """연결을 미리 세운다. 웜업 자체가 한도를 먹지 않도록 간격을 둔다."""
+    pairs = []
+    for tr in trs:
+        path, body = RATE_TR[tr]
+        c = httpx.Client(timeout=30)
+        c.post(f"{base}{path}", headers=_rate_headers(tok, tr), json=body)
+        pairs.append((c, tr))
+        time.sleep(0.35)
+    time.sleep(4)  # 웜업분이 버킷에서 빠지기를 기다린다
+    return pairs
+
+
+def _burst(base: str, tok: str, pairs: list[tuple[httpx.Client, str]]) -> list[tuple[str, int]]:
+    gate = threading.Barrier(len(pairs))
+
+    def one(item: tuple[httpx.Client, str]) -> tuple[str, int]:
+        c, tr = item
+        path, body = RATE_TR[tr]
+        gate.wait()
+        r = c.post(f"{base}{path}", headers=_rate_headers(tok, tr), json=body)
+        return tr, r.status_code
+
+    with ThreadPoolExecutor(max_workers=len(pairs)) as ex:
+        return list(ex.map(one, pairs))
+
+
+def _close(pairs: list[tuple[httpx.Client, str]]) -> None:
+    for c, _ in pairs:
+        c.close()
+
+
+def _rate_ready(p: Probe, *, enabled: bool) -> tuple[str, str] | None:
     if not _kiwoom_conf():
         p.result = "앱키 미설정"
-        return
+        return None
     if not enabled:
         p.result = "--probe-limits 를 주면 측정한다 (일부러 한도를 넘긴다)"
-        return
+        return None
     tok = os.environ.get("_PHASE0_TOKEN")
     if not tok:
         p.status = "FAIL"
         p.result = "토큰 없음"
-        return
+        return None
     _, _, base = _kiwoom_conf()  # type: ignore[misc]
-    hits: list[int] = []
-    t0 = time.monotonic()
-    for _ in range(10):
-        r = httpx.post(
-            f"{base}/api/dostk/stkinfo",
-            headers={
-                "authorization": f"Bearer {tok}",
-                "api-id": "ka10001",
-                "Content-Type": "application/json;charset=UTF-8",
-            },
-            json={"stk_cd": "005930"},
-            timeout=15,
-        )
-        hits.append(r.status_code)
-    elapsed = time.monotonic() - t0
-    okc = sum(1 for h in hits if h == 200)
+    return base, tok
+
+
+def b1_rate_limit(p: Probe, *, enabled: bool) -> None:
+    """문서상 초당 5회. 동시 발사로 실제 경계를 찾는다."""
+    ready = _rate_ready(p, enabled=enabled)
+    if not ready:
+        return
+    base, tok = ready
+    pairs = _warm(base, tok, ["ka10001"] * 20)
+    try:
+        res = _burst(base, tok, pairs)
+    finally:
+        _close(pairs)
+    ok = sum(1 for _, st in res if st == 200)
     p.status = "OK"
-    p.result = f"{elapsed:.2f}초에 10회 → 200 {okc}건 / 기타 {hits}"
+    p.result = f"동시 {len(res)}회 → 통과 {ok} · 429 {len(res) - ok}"
+    p.detail.append(
+        f"**문서상 초당 5회와 다르다** — 동시 발사에서 {ok}건이 통과한다. "
+        "순차로는 RTT 에 막혀 한도에 닿지 못한다(10회에 8.9초). "
+        "순차 결과를 '통과'로 읽으면 안 된다."
+    )
+
+
+def b2_shared_bucket(p: Probe, *, enabled: bool) -> None:
+    """TR 이 달라도 같은 버킷을 쓰는가 — 병렬 수집 설계가 여기서 갈린다."""
+    ready = _rate_ready(p, enabled=enabled)
+    if not ready:
+        return
+    base, tok = ready
+    pairs = _warm(base, tok, ["ka10001"] * 10 + ["ka10080"] * 10)
+    try:
+        res = _burst(base, tok, pairs)
+    finally:
+        _close(pairs)
+    per: dict[str, int] = {}
+    for tr, st in res:
+        per[tr] = per.get(tr, 0) + (1 if st == 200 else 0)
+    ok = sum(per.values())
+    # 단일 TR 20회에서 통과하는 수(B1)보다 뚜렷이 많으면 버킷이 분리돼 있다.
+    p.status = "OK"
+    p.result = (
+        f"TR 2종 10+10 → 통과 {ok} (" + " · ".join(f"{k} {v}" for k, v in sorted(per.items())) + ")"
+    )
+    p.detail.append(
+        "같은 조건에서 **단일 TR 은 10~11건만 통과한다**(B1). TR 을 나누면 그보다 많이 통과하므로 "
+        "**버킷은 TR 별로 분리돼 있다.** 서로 다른 TR 을 병렬로 돌리면 처리량이 배가된다 — "
+        "다만 한 TR 만 쓰는 백필(분봉=ka10080)에는 도움이 되지 않는다."
+    )
+
+
+def b3_recovery(p: Probe, *, enabled: bool) -> None:
+    """한도 초과 뒤 어떻게 복구되는가 — 재실행이 필요한가, 기다리면 되는가."""
+    ready = _rate_ready(p, enabled=enabled)
+    if not ready:
+        return
+    base, tok = ready
+    pairs = _warm(base, tok, ["ka10001"] * 20)
+    try:
+        res = _burst(base, tok, pairs)
+        blocked = sum(1 for _, st in res if st != 200)
+        if not blocked:
+            p.status = "OK"
+            p.result = "차단을 유발하지 못해 복구를 재지 못했다"
+            return
+        path, body = RATE_TR["ka10001"]
+        t0 = time.monotonic()
+        with httpx.Client(timeout=30) as single:
+            for _ in range(15):
+                r = single.post(f"{base}{path}", headers=_rate_headers(tok, "ka10001"), json=body)
+                if r.status_code == 200:
+                    break
+                time.sleep(1)
+        p.status = "OK"
+        p.result = f"429 {blocked}건 발생 후 {time.monotonic() - t0:.2f}초 만에 재개"
+        p.detail.append(
+            "차단이 지속되지 않는다 — 다음 호출이 곧바로 통과한다. "
+            "**프로그램 재실행이 필요 없다.** 초과분만 버려지는 형태다."
+        )
+    finally:
+        _close(pairs)
+
+
+def b5_sustained(p: Probe, *, enabled: bool) -> None:
+    """분·시간 누적 한도가 있는가. OpenAPI+ 에는 분당 100·시간당 1,000 이 있었다."""
+    ready = _rate_ready(p, enabled=enabled)
+    if not ready:
+        return
+    base, tok = ready
+    rate, dur = 5, 60  # 초당 한도(약 10) 아래로 1분. 분당 100 이 있다면 20초 안에 드러난다.
+    pairs = _warm(base, tok, ["ka10001"] * rate)
+    path, body = RATE_TR["ka10001"]
+    sent = ok = 0
+    t0 = time.monotonic()
+    try:
+        with ThreadPoolExecutor(max_workers=rate) as ex:
+            while time.monotonic() - t0 < dur:
+                tick = time.monotonic()
+                for st in ex.map(
+                    lambda c: (
+                        c.post(
+                            f"{base}{path}", headers=_rate_headers(tok, "ka10001"), json=body
+                        ).status_code
+                    ),
+                    [c for c, _ in pairs],
+                ):
+                    sent += 1
+                    ok += st == 200
+                time.sleep(max(0.0, 1.0 - (time.monotonic() - tick)))
+    finally:
+        _close(pairs)
+    p.status = "OK"
+    p.result = f"{rate}회/초 × {dur}초 = {sent}회 → 통과 {ok} · 거부 {sent - ok}"
+    if sent == ok:
+        p.detail.append(
+            f"**분당 한도는 없다** — 1분에 {sent}회가 전부 통과한다(OpenAPI+ 의 분당 100 은 REST 에 없다). "
+            "별도로 5분 창에서 1,250회를 보내 시간당 1,000 가설도 깨졌다."
+        )
 
 
 # ── 실행 ────────────────────────────────────────────────
@@ -427,11 +585,15 @@ def main(argv: list[str] | None = None) -> int:
     probes.append(_run(Probe("A5", "리눅스에서 정상 동작"), a5_linux))
 
     print("\nB. 유량 제한")
+    lim = args.probe_limits
+    probes.append(_run(Probe("B1", "조회 TR 초당 한도"), lambda p: b1_rate_limit(p, enabled=lim)))
     probes.append(
-        _run(
-            Probe("B1", "조회 TR 초당 한도"), lambda p: b1_rate_limit(p, enabled=args.probe_limits)
-        )
+        _run(Probe("B2", "서로 다른 TR 도 합산되는지"), lambda p: b2_shared_bucket(p, enabled=lim))
     )
+    probes.append(
+        _run(Probe("B3", "한도 초과 시 복구 방식"), lambda p: b3_recovery(p, enabled=lim))
+    )
+    probes.append(_run(Probe("B5", "분·시간 누적 한도"), lambda p: b5_sustained(p, enabled=lim)))
 
     print("\nD. 차트·시세")
     probes.append(
