@@ -23,6 +23,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 
 import httpx
@@ -216,20 +217,38 @@ def d2_naver_minute_depth(p: Probe) -> None:
     """
     url = (
         "https://api.finance.naver.com/siseJson.naver"
-        "?symbol=005930&requestType=1&startTime=20250101&endTime=20260826&timeframe=minute"
+        "?symbol=005930&requestType=1&startTime=20250101"
+        f"&endTime={datetime.now(dcfg.KST):%Y%m%d}&timeframe=minute"
     )
     r = httpx.get(url, headers=UA, timeout=25)
     rows = json.loads(r.text.replace("'", '"'))[1:]
     days = sorted({str(x[0])[:8] for x in rows})
-    with_ohlc = sum(1 for x in rows if x[1] is not None)
+    # x[1] 은 시가다. 시·고·저가가 함께 비므로 시가 유무로 대표한다 — 종가는 온다.
+    with_open = sum(1 for x in rows if x[1] is not None)
     p.status = "OK"
-    p.result = (
-        f"{len(days)}거래일 ({days[0]}~{days[-1]}) · {len(rows):,}행 · OHLC {with_ohlc}/{len(rows)}"
-    )
+    p.result = f"{len(days)}거래일 ({days[0]}~{days[-1]}) · {len(rows):,}행 · 시가 있는 행 {with_open}/{len(rows)}"
+    # 거래량이 당일 누적인지 실측한다 — 하드코딩된 주장 대신 측정값을 남긴다.
+    last_day = days[-1]
+    # 응답 행 순서를 신뢰하지 않는다 — 시각으로 정렬한 뒤에 본다.
+    day_rows = sorted((x for x in rows if str(x[0])[:8] == last_day), key=lambda x: str(x[0]))
+    vols = [x[5] for x in day_rows if x[5] is not None]
+    drops = sum(1 for a, b in pairwise(vols) if b < a)
+    cumulative = bool(vols) and drops == 0 and vols[-1] > vols[0]
     p.detail.append(
-        "시가·고가·저가가 전부 null 이다 — 종가와 거래량만 온다. "
-        "거래량은 당일 **누적**이므로 분봉 거래량은 연속 행의 차분으로 구해야 한다."
+        f"시가·고가·저가 null {len(rows) - with_open}/{len(rows)}행 — 종가와 거래량만 온다."
     )
+    if not vols:
+        p.detail.append(f"{last_day} 거래량 행이 없다 — 누적 여부를 판정하지 못했다.")
+    else:
+        p.detail.append(
+            f"{last_day} 거래량 {vols[0]:,} → {vols[-1]:,} · 감소 지점 {drops}건 → "
+            + (
+                "당일 **누적**이다. 분봉 거래량은 연속 행의 차분으로 구해야 한다."
+                if cumulative
+                else "누적이 아니다 — 차분 처리를 하면 안 된다."
+            )
+        )
+    p.detail.append(f"창 길이는 롤링이다 — 이번 측정은 {len(days)}거래일. 고정 상수가 아니다.")
     p.detail.append(
         "네이버로는 소급이 안 된다 — 다만 이는 원천의 한계이지 분봉의 한계가 아니다. 키움(D2)은 소급된다."
     )
