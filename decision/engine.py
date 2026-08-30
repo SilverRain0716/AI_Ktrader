@@ -20,9 +20,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import os
 import sqlite3
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,7 +28,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from data import config as dcfg
-from decision import contract
+from decision import contract, providers
 
 log = logging.getLogger("decision")
 
@@ -43,7 +41,6 @@ SCHEMA_PATH = ROOT / "schemas" / "decision.schema.json"
 RENDER_VERSION = "r1"
 
 PROMPT_ID = "decision_v1"
-MODEL = "claude-opus-5"
 API_PARAMS: dict[str, Any] = {
     "max_tokens": 16000,
     "output_config": {"effort": "high"},
@@ -279,6 +276,7 @@ def save_decision(conn: sqlite3.Connection, row: dict) -> None:
         "cycle",
         "generated_at",
         "valid_until",
+        "provider",
         "model",
         "prompt_id",
         "prompt_sha256",
@@ -313,47 +311,24 @@ def _monitorability(payload: dict | None) -> tuple[int | None, int | None]:
 # ── 호출 ────────────────────────────────────────────────
 
 
-def _client():
-    """Anthropic 클라이언트. 키가 없으면 여기서 분명하게 멈춘다."""
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise DecisionRefused(
-            "ANTHROPIC_API_KEY 가 설정되지 않았다. .env 에 채워라 — 판단 엔진의 유일한 외부 의존이다."
-        )
-    import anthropic
-
-    return anthropic.Anthropic()
+def _provider(name: str | None = None, *, client=None):
+    """제공자를 만든다. 자격증명이 없으면 여기서 분명하게 멈춘다."""
+    try:
+        return providers.get(name, client=client)
+    except providers.MissingCredential as e:
+        raise DecisionRefused(f"{e} 쓰려는 제공자의 키만 있으면 된다 — .env 를 보라.") from e
 
 
-def call_model(client, rendered: str, prompt: str, schema: dict) -> dict:
+def call_model(provider, model: str, rendered: str, prompt: str, schema: dict):
     """도구 없는 단일 호출. 출력은 스키마로 강제한다.
 
-    `output_config.format` 이 스키마를 강제하므로 생산자와 검증자가 같은 계약을 쓴다.
-    그래도 아래에서 다시 검증한다 — 강제됐다는 말과 강제됐는지 확인하는 것은 다르다.
+    강제하고도 아래에서 다시 검증한다 — 강제됐다는 말과 강제됐는지 확인하는 것은 다르다.
+    제공자마다 강제 범위가 달라서(OpenAI strict 는 `pattern`·`minimum` 을 보지 않는다)
+    **정확성을 디코더에 맡기지 않는 것**이 제공자 교체를 안전하게 만든다.
     """
-    t0 = time.monotonic()
-    params = dict(API_PARAMS)
-    params["output_config"] = {
-        **params["output_config"],
-        "format": {
-            "type": "json_schema",
-            "schema": schema,
-        },
-    }
-    resp = client.messages.create(
-        model=MODEL,
-        system=prompt,
-        messages=[{"role": "user", "content": rendered}],
-        **params,
+    return provider.call(
+        model=model, system=prompt, user=rendered, schema=schema, params=API_PARAMS
     )
-    text = next((b.text for b in resp.content if b.type == "text"), "")
-    return {
-        "raw": text,
-        "stop_reason": resp.stop_reason,
-        "request_id": getattr(resp, "_request_id", None),
-        "input_tokens": resp.usage.input_tokens,
-        "output_tokens": resp.usage.output_tokens,
-        "latency_ms": int((time.monotonic() - t0) * 1000),
-    }
 
 
 def decide(
@@ -361,6 +336,8 @@ def decide(
     pack: dict,
     arm: int,
     *,
+    provider=None,
+    model: str | None = None,
     client=None,
     now: datetime | None = None,
 ) -> dict:
@@ -370,6 +347,8 @@ def decide(
     않는다"가 성립한다(ADR 0007 근거 4).
     """
     now = now or datetime.now(dcfg.KST)
+    provider = provider or _provider(client=client)
+    model = providers.resolve_model(provider, model)
     pack_input = pack_for_arm(pack, arm)
     rendered = render_input(pack, arm)
     prompt = prompt_text()
@@ -384,21 +363,22 @@ def decide(
         "cycle": pack["cycle"],
         "generated_at": now.isoformat(),
         "valid_until": _valid_until(pack["cycle"], now),
-        "model": MODEL,
+        "provider": provider.name,
+        "model": model,
         "prompt_id": PROMPT_ID,
         "prompt_sha256": contract.canonical_sha256(prompt),
         "render_version": RENDER_VERSION,
         "api_params": json.dumps(API_PARAMS, ensure_ascii=False, sort_keys=True),
         "rendered_input": rendered,
     }
-    client = client or _client()
     last: dict = {}
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         row = {**base, "attempt": attempt}
         try:
-            got = call_model(client, rendered, prompt, schema)
-        except DecisionRefused:
+            got = call_model(provider, model, rendered, prompt, schema)
+        except (DecisionRefused, providers.MissingCredential):
+            # 설정 문제는 재시도할 것이 아니다. 3번 실패로 기록하면 원인이 가려진다.
             raise
         except Exception as e:  # API 장애·타임아웃 — 판단의 부재이지 abstain 이 아니다
             row.update(status="api_error", problems=json.dumps([f"{type(e).__name__}: {e}"]))
@@ -408,25 +388,25 @@ def decide(
             continue
 
         row.update(
-            raw_response=got["raw"],
-            request_id=got["request_id"],
-            input_tokens=got["input_tokens"],
-            output_tokens=got["output_tokens"],
-            latency_ms=got["latency_ms"],
+            raw_response=got.raw,
+            request_id=got.request_id,
+            input_tokens=got.input_tokens,
+            output_tokens=got.output_tokens,
+            latency_ms=got.latency_ms,
         )
 
         # 잘린 응답을 부분 파싱하지 않는다 — 우연히 유효한 JSON 일 수 있다
-        if got["stop_reason"] != "end_turn":
+        if got.stop_reason != providers.END_TURN:
             row.update(
-                status="api_error" if got["stop_reason"] == "refusal" else "schema_rejected",
-                problems=json.dumps([f"stop_reason={got['stop_reason']} — 전체 거부"]),
+                status="api_error" if got.stop_reason == providers.REFUSAL else "schema_rejected",
+                problems=json.dumps([f"stop_reason={got.stop_reason} — 전체 거부"]),
             )
             save_decision(conn, row)
             last = row
             continue
 
         try:
-            payload = json.loads(got["raw"])
+            payload = json.loads(got.raw)
         except json.JSONDecodeError as e:
             row.update(status="schema_rejected", problems=json.dumps([f"JSON 파싱 실패: {e}"]))
             save_decision(conn, row)
@@ -473,7 +453,15 @@ def decide(
     )
 
 
-def decide_pair(conn: sqlite3.Connection, pack: dict, *, client=None, **kw) -> dict:
+def decide_pair(
+    conn: sqlite3.Connection,
+    pack: dict,
+    *,
+    provider=None,
+    model: str | None = None,
+    client=None,
+    **kw,
+) -> dict:
     """Arm 1·2 를 같은 팩에 대해 짝으로 낸다.
 
     한쪽만 실패하면 성공한 쪽은 그대로 쓰되 **쌍에서 제외** 표시를 돌려준다 —
@@ -483,11 +471,16 @@ def decide_pair(conn: sqlite3.Connection, pack: dict, *, client=None, **kw) -> d
     "설정이 없어서 아무것도 못 했다"가 "양쪽 arm 이 실패했다"로 보고되고,
     사람은 판단이 나빴다고 읽는다 — 원인과 증상이 뒤바뀐다.
     """
-    client = client or _client()  # 설정 문제는 여기서 그대로 올라간다
-    out: dict[str, Any] = {"paired": True}
+    # 제공자·모델을 한 번 정해 **두 arm 에 같은 것을 쓴다.** arm 마다 다시 고르면
+    # 환경변수가 중간에 바뀌거나 폴백이 끼어들 때 `Arm 1 − Arm 2` 차이에 제공자 차이가
+    # 섞이고, 그러면 F3 는 브리핑이 아니라 모델 차이를 잰다.
+    provider = provider or _provider(client=client)  # 설정 문제는 여기서 그대로 올라간다
+    model = providers.resolve_model(provider, model)
+
+    out: dict[str, Any] = {"paired": True, "provider": provider.name, "model": model}
     for arm in (1, 2):
         try:
-            out[f"arm{arm}"] = decide(conn, pack, arm, client=client, **kw)
+            out[f"arm{arm}"] = decide(conn, pack, arm, provider=provider, model=model, **kw)
         except DecisionRefused as e:
             log.error("arm %d 실패: %s", arm, e)
             out[f"arm{arm}"] = None
@@ -496,10 +489,10 @@ def decide_pair(conn: sqlite3.Connection, pack: dict, *, client=None, **kw) -> d
 
 
 __all__ = [
-    "MODEL",
     "PROMPT_ID",
     "RENDER_VERSION",
     "DecisionRefused",
+    "call_model",
     "decide",
     "decide_pair",
     "derive_arm2",

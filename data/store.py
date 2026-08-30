@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -211,6 +211,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     pack_id        TEXT NOT NULL,
     pack_sha256    TEXT NOT NULL,       -- 팩이 덮였는지 사후 검출용
     arm            INTEGER NOT NULL,    -- 0=정량 / 1=브리핑 포함 / 2=브리핑 제외
+    provider       TEXT,                -- anthropic|openai. 교체는 모델 교체와 같은 급의 함수 변경이다
     cycle          TEXT NOT NULL,
     generated_at   TEXT NOT NULL,
     valid_until    TEXT NOT NULL,       -- 이 시각 이후 집행 금지
@@ -335,6 +336,11 @@ def _migrate_v8(conn):
     )
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """decisions.provider 추가. 제공자는 판단 함수의 신원 일부다 (ADR 0007 동결 정책)."""
+    _add_column_if_missing(conn, "decisions", "provider", "TEXT")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -344,6 +350,7 @@ _MIGRATIONS: dict[int, object] = {
     7: _migrate_v7,  # 업종 대분류 규칙 확장 → 기존 행 재분류
     8: _migrate_v8,  # is_managed_known 분리 (판정 못한 것을 정상으로 두지 않는다)
     9: "",  # decisions 테이블 추가 — _SCHEMA 재실행으로 충분
+    10: _migrate_v10,  # decisions.provider 추가
 }
 
 
