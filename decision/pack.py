@@ -18,6 +18,7 @@ from jsonschema import Draft202012Validator
 
 from data import config as dcfg
 from data import store
+from data.sources import kiwoom
 from decision import config, contract, positions, universe
 
 log = logging.getLogger(__name__)
@@ -283,12 +284,75 @@ def estimate_tokens(payload: dict) -> int:
     return int(len(json.dumps(payload, ensure_ascii=False)) / config.CHARS_PER_TOKEN)
 
 
+# ── 장중 현재가 덮어쓰기 ────────────────────────────────
+
+# 장이 열려 있는 사이클. premarket 은 개장 전이므로 전일 종가가 **맞는** 값이고,
+# postmarket 은 배치가 곧 도는 시각이라 덮어쓸 이유가 없다.
+LIVE_SESSIONS = ("midday", "preclose", "event")
+
+
+def _overlay_spot(pack: dict, cycle: str, *, client=None) -> None:
+    """유니버스·포지션의 가격을 장중 현재가로 덮는다.
+
+    **못 덮으면 덮은 척하지 않는다.** 팩의 `data_quality.price_source` 가 무엇을 실었는지
+    말하고, 실패하면 경고가 남는다 — 전 거래일 종가를 장중 가격인 것처럼 넘기면
+    AI 는 오전 흐름을 봤다고 착각한 채 판단한다.
+
+    일부만 받았을 때 섞어 쓰지 않는 이유도 같다. 20종목 중 3종목만 전일 종가면
+    그 3종목의 등락률이 다른 17종목과 다른 것을 재게 되고, 그 사실이 겉으로 안 보인다.
+    """
+    dq = pack["data_quality"]
+    if cycle not in LIVE_SESSIONS:
+        dq["price_source"] = "daily_close"
+        return
+
+    codes = [u["code"] for u in pack["universe"]] + [p["code"] for p in pack["positions"]]
+    if not codes:
+        dq["price_source"] = "daily_close"
+        return
+
+    try:
+        quotes, failed = kiwoom.fetch_spots(sorted(set(codes)), client=client)
+    except kiwoom.KiwoomUnavailable as e:
+        dq["price_source"] = "daily_close"
+        dq["warnings"].append(
+            f"장중 현재가를 받지 못했다 ({e}) — 가격이 전 거래일 종가다. "
+            "오전 흐름은 이 팩에 반영돼 있지 않다."
+        )
+        log.warning("장중 현재가 실패 — 전일 종가로 진행한다: %s", e)
+        return
+
+    if failed:
+        # 섞느니 통째로 전일 종가를 쓴다. 어느 쪽이 어느 것인지 모르는 상태가 더 나쁘다.
+        dq["price_source"] = "daily_close"
+        sample = "; ".join(f"{c} {why}" for c, why in list(failed.items())[:3])
+        dq["warnings"].append(
+            f"장중 현재가 {len(failed)}종목 결손 — 섞지 않고 전 거래일 종가로 통일했다. ({sample})"
+        )
+        log.warning("장중 현재가 결손 %d종목: %s", len(failed), failed)
+        return
+
+    for item in pack["universe"]:
+        q = quotes[item["code"]]
+        ind = item.setdefault("indicators", {})
+        ind["close"] = q.price
+        if q.change_pct is not None:
+            ind["change_pct"] = q.change_pct
+    for pos in pack["positions"]:
+        q = quotes[pos["code"]]
+        pos["current_price"] = q.price
+
+    dq["price_source"] = "intraday"
+    dq["price_as_of"] = max(q.as_of for q in quotes.values())
+
+
 def build(
     conn: sqlite3.Connection,
     *,
     cycle: str,
     generated_at: datetime | None = None,
     event_trigger: dict | None = None,
+    spot_client=None,
 ) -> dict:
     if cycle not in config.CYCLES:
         raise ValueError(f"알 수 없는 사이클: {cycle}")
@@ -376,6 +440,8 @@ def build(
     }
     if event_trigger:
         pack["event_trigger"] = event_trigger
+
+    _overlay_spot(pack, cycle, client=spot_client)
 
     est = estimate_tokens(pack)
     if est > config.MAX_PACK_TOKENS:

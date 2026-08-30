@@ -25,7 +25,7 @@
 **그래서 작업 규칙이 하나 있다.**
 
 고칠 때마다 **"그 상태로 되돌아가는 경로"를 실패하는 테스트로 막는다.**
-현재 329건의 절반 이상이 그 목적으로 추가된 것이다.
+현재 351건의 절반 이상이 그 목적으로 추가된 것이다.
 값을 고쳤으면 그 값이 다시 틀렸을 때 빨간불이 켜지는지 **직접 확인**한다 — 통과하는 것을 보는 것으로는 부족하다.
 
 ---
@@ -63,7 +63,7 @@ pre-commit install          # gitleaks · ruff · .env 차단
 **커밋 전 검증 4종:**
 
 ```bash
-pytest -q                          # 329 passed
+pytest -q                          # 351 passed
 ruff check . && ruff format --check .
 python scripts/validate_schemas.py
 mypy .                             # CI 에 없다. 대부분 스텁 누락 노이즈 — 건수가 늘지 않는지만 본다
@@ -83,9 +83,10 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 | **FDR 소속부** | FDR `KRX-DESC` 의 컬럼 이름은 `Sector` 인데 **내용은 업종이 아니라 소속부**다(진짜 업종은 `Industry`). 저장소는 이걸 `dept` 로 바꿔 담는다(`data/sources/listing.py:210`). 코스닥 전용이라 **KOSPI 는 전부 결측**이고, 이 신호만으로 관리종목을 판정할 수 없다. 네이버 `isManagement` 와 **합집합**으로 쓴다 |
 | **금액 단위** | 두 종류다. **지표·수급은 `_eok_krw`(억원)** — `adv20_eok_krw` · `market_cap_eok_krw` · `foreign_net_5d_eok_krw` · `inst_net_5d_eok_krw`. **계좌·손익·한도는 `_krw`(원)** — `cash_available_krw` · `total_equity_krw` · `unrealized_pnl_krw` · `realized_pnl_today_krw` · `daily_loss_limit_krw`. 브리핑 수급(`foreign_eok_krw` 등)도 억원이다. **접미사가 곧 단위다 — 필드를 추가할 때 이름을 맞춘다.** 억원 필드를 `_bil_krw`(십억) 로 잘못 읽으면 값이 **10배** 어긋난다 — 한 번 그랬다 |
 | **거래일 vs 달력일** | OHLCV 신선도는 **거래일** 기준이다 — 달력일로 세면 금요일 배치 → 월요일 아침이 3일 낡음으로 거부된다. 반면 수급은 아직 달력일(`MAX_FLOWS_STALE_DAYS`)이다. **둘이 다르다는 것을 알고 손댄다** |
-| **키움 가격의 부호** | `-257000` 은 **음수가 아니라 전일대비 하락 표시**다. 그대로 `int()` 하면 가격이 음수가 되고 수익률·지표가 조용히 뒤집힌다. `scripts/phase0_probe.py` 의 `kiwoom_price()` 가 뗀다 — **아직 프로브에만 있다. 적재 경로에 키움 소스가 생기면 거기로 옮겨야 한다** |
+| **키움 가격의 부호** | `-257000` 은 **음수가 아니라 전일대비 하락 표시**다. 그대로 `int()` 하면 가격이 음수가 되고 수익률·지표가 조용히 뒤집힌다. 정본은 `data/sources/kiwoom.py` 의 `kiwoom_price()` 다(2026-08-30 프로브에서 옮김). 그리고 `SpotQuote.consistent` 가 **우리 계산 등락률을 거래소 `flu_rt` 와 대조**한다 — 부호를 안 떼면 여기 걸린다 |
 | **분봉 백필은 동시성으로 푼다** | 순차로는 호출당 2.2초라 44시간이지만, **동시 8 이면 3.61콜/초(24/24 통과)로 약 5.7시간**이다(실측). 유량은 동시 10~11회가 경계이고 분·시간 누적 한도는 없다. 동시 12 는 4.9시간이나 24건 중 2건이 429 다 |
 | **결정 스키마는 형식만 본다** | 전 필드가 `required` + nullable 이라 **`stop: null` 인 BUY 도 스키마는 통과한다.** action 별 필수 조건은 `decision/contract.py` 의 `action_requirements()` 가 막는다 — 예전 `allOf`/`if-then` 을 옮겨온 것이다. 스키마만 통과시키고 끝내면 손절 없는 진입이 나간다 |
+| **장중 가격은 사이클마다 다르다** | premarket·postmarket 팩은 **전 거래일 종가가 맞는 값**이고, midday·preclose·event 는 키움 `ka10001` 현재가로 덮는다. 못 받으면 **덮은 척하지 않는다** — `data_quality.price_source` 가 `intraday`/`daily_close` 를 말하고 결손 사유가 경고에 남는다. 일부만 성공하면 **섞지 않고 통째로 전일 종가로 통일**한다 |
 | **`as_of` 상한** | 지표·거래정지·공시·브리핑 **전부** `as_of` 이하만 본다. 하나라도 빠지면 미래 정보가 유니버스에 샌다 |
 
 ---
@@ -107,7 +108,7 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 | 문서 | 언제 읽나 |
 |---|---|
 | [`docs/03-current-state.md`](docs/03-current-state.md) | **여기부터.** 지금까지 한 것과 남은 것 |
-| [`docs/adr/`](docs/adr/) | 왜 그렇게 결정했는가. 0004(시크릿)·0005(백테스트 범위)·0006(엣지 가설)은 필독 |
+| [`docs/adr/`](docs/adr/) | 왜 그렇게 결정했는가. 0004(시크릿)·0005(백테스트 범위)·0006(엣지 가설)·0009(매매 시점)은 필독 |
 | [`docs/01-context-pack-design.md`](docs/01-context-pack-design.md) | 팩 설계. **11장에 고친 결함이 누적된다** |
 | [`docs/phase0-verification.md`](docs/phase0-verification.md) | 실측 체크리스트 35항목. 결과는 [`phase0-results.md`](docs/phase0-results.md) |
 
