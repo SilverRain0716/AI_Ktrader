@@ -665,6 +665,18 @@
             }
           ],
           "description": "공시를 적재하기 시작한 날짜(YYYYMMDD). 상장폐지·불성실공시 종목의 유니버스 배제는 기간 제한이 없으므로, 배제 집합의 크기가 이 날짜에 달려 있다. null이면 공시 필터가 비활성이다."
+        },
+        "price_source": {
+          "type": "string",
+          "enum": [
+            "intraday",
+            "daily_close"
+          ],
+          "description": "유니버스·포지션 가격이 무엇인가. intraday=사이클 시점 장중 현재가 / daily_close=전 거래일 종가. **장중 사이클(12:20·15:00)인데 daily_close 면 오전 흐름이 이 팩에 반영돼 있지 않다** — 그 경우 warnings 에 이유가 남는다. 일부만 장중가인 상태는 만들지 않는다(섞이면 어느 쪽이 어느 것인지 알 수 없다)."
+        },
+        "price_as_of": {
+          "type": "string",
+          "description": "price_source=intraday 일 때 현재가 조회 시각 (ISO 8601, KST)."
         }
       }
     }

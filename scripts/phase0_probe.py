@@ -131,16 +131,8 @@ def e4_fdr_delisting(p: Probe) -> None:
 KIWOOM_MINUTE_TR = "ka10080"
 
 
-def kiwoom_price(raw: str | int | None) -> int | None:
-    """키움 차트 가격의 부호 접두를 떼어낸다.
-
-    `'-257000'` 은 **음수가 아니라 전일대비 하락 표시**다. 그대로 int() 하면
-    가격이 음수가 되고, 수익률·지표가 조용히 뒤집힌다. 값 자체는 항상 절댓값이다.
-    """
-    text = str(raw).strip() if raw is not None else ""
-    if not text:
-        return None
-    return abs(int(text.lstrip("+-")))
+# 가격 파서(`kiwoom_price`)는 `data/sources/kiwoom.py` 로 옮겼다 — 적재 경로가 정본이다.
+# 같은 함수가 두 곳에 있으면 한쪽만 고쳐지고, 그 사실이 겉으로 드러나지 않는다.
 
 
 def d2_kiwoom_minute_depth(p: Probe, *, deep: bool) -> None:
@@ -207,7 +199,7 @@ def d2_kiwoom_minute_depth(p: Probe, *, deep: bool) -> None:
         )
     p.detail.append(
         "가격에 부호 접두가 붙는다(`'-257000'`) — 음수가 아니라 전일대비 하락 표시다. "
-        "`kiwoom_price()` 로 떼어낸다."
+        "`data.sources.kiwoom.kiwoom_price()` 로 떼어낸다."
     )
 
 
