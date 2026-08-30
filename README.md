@@ -155,6 +155,7 @@ python -m decision.pipeline status
 - [컨텍스트 팩 설계](docs/01-context-pack-design.md) — 11장에 점검에서 드러난 결함과 조치가 누적된다
 - [ADR 0005 — 백테스트 범위](docs/adr/0005-backtest-scope.md) — 무엇을 백테스트할 수 있고 무엇을 못 하는가
 - [ADR 0006 — 엣지 가설과 반증 조건](docs/adr/0006-edge-hypothesis.md) — 왜 돈을 버는가, 언제 틀렸다고 인정하는가
+- [ADR 0007 — 판단 엔진](docs/adr/0007-judgment-engine.md) — AI 를 어떻게 부르고, 무엇을 남기는가
 - [ADR](docs/adr/) — 왜 그렇게 결정했는가
 
 ---

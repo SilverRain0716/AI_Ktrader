@@ -96,6 +96,7 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 - **회계 항등식**(`decision/positions.py` 의 `account_state`): `cash = 시드 − Σ취득원가 + Σ실현손익`. `total_equity − 현재평가금` 으로 현금을 구하면 하락장에서 매수 여력이 늘어난다
 - **키움 토큰은 TTL 24시간이고, 재발급해도 같은 토큰이 돌아온다.** 프로세스 간 갱신 조율은 필요 없다. 대신 **강제 회전이 불가능**하다 — 키가 샜을 때 할 수 있는 일이 재발급이 아니라 폐기뿐이다
 - `schemas/` 가 계층 간 계약이다. **지표를 추가할 때는 스키마를 먼저 고친다**
+- **판단 엔진을 만들기 전에 [ADR 0007](docs/adr/0007-judgment-engine.md) 을 읽는다.** 호출은 저장소 안 **도구 없는** API 호출이고(외부 세션은 팩 밖을 봐서 F3 를 오염시킨다), 결정 저장소는 판단 엔진과 **같은 회차**에 만들며, `decision_id` 는 모델이 아니라 **러너가 생성**한다. 선행 작업 둘 — `decision.schema.json` 개정(계약 분리 · `arm` 추가 · `invalidation` 구조화 · strict 부적합 10곳)과 `pack.save()` 불변화
 
 ---
 
@@ -121,7 +122,8 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 - `KILL_SWITCH` · `EXECUTION_MODE` — `.env.example` 에만 있고 **읽는 코드가 없다**
 - `decision.schema.json` — 142줄인데 **생산자도 인스턴스 검증자도 없다**
 - `constraints` — 팩에 실려 AI 에게 통보될 뿐 **강제되지 않는다**
-- `invalidation_hit` — 1로 바꾸는 UPDATE 가 없다
+- `invalidation_hit` — 1로 바꾸는 UPDATE 가 없다. **자유 텍스트는 기계가 감시할 수 없다** — ADR 0007 이 조건 문법으로 바꾼다
+- `account.is_mock` — `decision/config.py` 에서 **상수 `True`**. `KIWOOM_ENV` 와 무관하며 **팩에 실려 AI 가 읽는다**
 - 프로브의 `KIWOOM_REST_BASE` 기본값은 **모의 서버**인데, 기록된 A3·A4·B1·D2 측정치는 전부 **실전 서버**에서 나온 것이다. 환경변수 없이 다시 돌리면 그 숫자가 재현되지 않는다
 - 키움 앱키는 **실전 3계좌뿐**이다. 모의 키는 별도 신청이고 아직 없다 — Phase 6 의 선결 조건이다
 

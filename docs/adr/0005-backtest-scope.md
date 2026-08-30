@@ -2,7 +2,7 @@
 
 - 상태: 채택
 - 날짜: 2026-08-25
-- 관련: [ADR 0002](0002-condition-search-as-sensor.md), [ADR 0003](0003-ai-decides-last.md), [ADR 0006](0006-edge-hypothesis.md), [설계안 v1](../00-design-v1.md)
+- 관련: [ADR 0002](0002-condition-search-as-sensor.md), [ADR 0003](0003-ai-decides-last.md), [ADR 0006](0006-edge-hypothesis.md), [ADR 0007](0007-judgment-engine.md), [설계안 v1](../00-design-v1.md)
 
 ## 맥락
 

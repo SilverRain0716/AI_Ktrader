@@ -2,7 +2,7 @@
 
 - 상태: 채택
 - 날짜: 2026-08-25
-- 관련: [ADR 0003](0003-ai-decides-last.md), [ADR 0005](0005-backtest-scope.md), [컨텍스트 팩 설계](../01-context-pack-design.md)
+- 관련: [ADR 0003](0003-ai-decides-last.md), [ADR 0005](0005-backtest-scope.md), [ADR 0007](0007-judgment-engine.md), [컨텍스트 팩 설계](../01-context-pack-design.md)
 
 ## 맥락
 
