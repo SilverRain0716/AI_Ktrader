@@ -205,3 +205,60 @@ def test_유니버스가_비면_부르지_않는다() -> None:
     packmod._overlay_spot(p, "midday", client=kiwoom.KiwoomClient(base="https://x", http=http))
     assert p["data_quality"]["price_source"] == "daily_close"
     assert http.calls == []
+
+
+# ── 4. 실전과 모의는 유량이 다르다 ──────────────────────
+
+
+@pytest.mark.parametrize(
+    ("base", "is_mock", "workers"),
+    [
+        ("https://api.kiwoom.com", False, kiwoom.MAX_CONCURRENCY),
+        ("https://mockapi.kiwoom.com", True, kiwoom.MOCK_MAX_CONCURRENCY),
+    ],
+)
+def test_모의는_동시성을_낮춘다(base, is_mock, workers) -> None:
+    """실측(2026-08-30): 실전 동시 통과 10~11 · 모의 3 고정(지속은 2콜/초 상한).
+
+    실전 기준 동시성을 모의에 그대로 쓰면 8건 중 5~6건이 429 다.
+    """
+    c = kiwoom.KiwoomClient(base=base, http=FakeHTTP({}))
+    assert c.is_mock is is_mock
+    assert c.max_workers == workers
+
+
+def test_모의_동시성이_실전보다_낮다() -> None:
+    """상수를 뒤집어 놓으면 이 테스트가 잡는다 — 값만 보면 어느 쪽이 어느 쪽인지 모른다."""
+    assert kiwoom.MOCK_MAX_CONCURRENCY < kiwoom.MAX_CONCURRENCY
+
+
+def test_종목_수보다_많은_워커를_만들지_않는다() -> None:
+    c = kiwoom.KiwoomClient(base="https://api.kiwoom.com", http=FakeHTTP(QUOTES))
+    ok, failed = c.spots(["005930"])
+    assert set(ok) == {"005930"} and not failed
+
+
+def test_엔드포인트로_판정한다_환경변수가_아니라(monkeypatch) -> None:
+    """KIWOOM_ENV 는 읽는 코드가 따로 없어 믿을 수 없다. 실제로 어디에 쏘는지는 base 가 정한다."""
+    monkeypatch.setenv("KIWOOM_ENV", "real")
+    assert kiwoom.KiwoomClient(base="https://mockapi.kiwoom.com", http=FakeHTTP({})).is_mock
+
+
+def test_모의는_호출_간격도_강제한다() -> None:
+    """동시성만 낮추면 부족하다 — 동시 2 라도 RTT 0.7초면 초당 2.8회가 나간다.
+    실제로 그렇게 해서 20종목 중 1종목이 429 였다. 제약은 동시성이 아니라 속도다."""
+    real = kiwoom.KiwoomClient(base="https://api.kiwoom.com", http=FakeHTTP({}))
+    mock = kiwoom.KiwoomClient(base="https://mockapi.kiwoom.com", http=FakeHTTP({}))
+    assert real.min_interval == 0.0
+    assert mock.min_interval > 0
+    assert 1 / mock.min_interval <= 2.0  # 모의 지속 상한 2콜/초를 넘지 않는다
+
+
+def test_페이싱이_실제로_기다린다() -> None:
+    import time as _t
+
+    c = kiwoom.KiwoomClient(base="https://mockapi.kiwoom.com", http=FakeHTTP(QUOTES))
+    t0 = _t.monotonic()
+    c.spot("005930")
+    c.spot("005930")
+    assert _t.monotonic() - t0 >= kiwoom.MOCK_MIN_INTERVAL_SEC
