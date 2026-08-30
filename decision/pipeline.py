@@ -4,6 +4,7 @@
     python -m decision.pipeline build --cycle premarket
     python -m decision.pipeline build --cycle event --code 005930 --trigger invalidation_hit
     python -m decision.pipeline decide --pack-id 20260821-0820-premarket   # Arm 1·2 짝
+    python -m decision.pipeline decide --provider openai --model gpt-5.6
     python -m decision.pipeline show  --pack-id 20260821-0820-premarket
     python -m decision.pipeline status
 
@@ -19,7 +20,7 @@ import logging
 import sys
 
 from data import store
-from decision import config, engine, pack
+from decision import config, engine, pack, providers
 
 log = logging.getLogger("decision")
 
@@ -122,7 +123,7 @@ def task_status(conn) -> int:
     return 0 if limits_ok else 3
 
 
-def task_decide(conn, pack_id: str | None) -> int:
+def task_decide(conn, pack_id: str | None, provider: str | None, model: str | None) -> int:
     """Arm 1·2 를 같은 팩에 대해 짝으로 판단한다 (ADR 0005 3-arm).
 
     한쪽만 실패하면 성공한 쪽은 쓰되 **쌍에서 제외**된다 — 짝 없는 관측을 쌍으로 세면
@@ -142,11 +143,12 @@ def task_decide(conn, pack_id: str | None) -> int:
 
     p = json.loads(row[0])
     try:
-        out = engine.decide_pair(conn, p)
+        out = engine.decide_pair(conn, p, provider=engine._provider(provider), model=model)
     except engine.DecisionRefused as e:
         log.error("%s", e)
         return 3  # 설정 문제 (대개 ANTHROPIC_API_KEY)
 
+    log.info("제공자 %s · 모델 %s", out["provider"], out["model"])
     for arm in (1, 2):
         r = out.get(f"arm{arm}")
         if r is None:
@@ -180,6 +182,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--code", default=None)
     p.add_argument("--detail", default=None)
     p.add_argument("--pack-id", default=None)
+    p.add_argument(
+        "--provider",
+        choices=providers.available(),
+        default=None,
+        help="LLM 제공자. 기본값은 AIK_LLM_PROVIDER, 그것도 없으면 anthropic",
+    )
+    p.add_argument("--model", default=None, help="모델 이름. 기본값은 AIK_LLM_MODEL")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -196,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
                 conn, cycle=args.cycle, trigger=args.trigger, code=args.code, detail=args.detail
             )
         if args.task == "decide":
-            return task_decide(conn, args.pack_id)
+            return task_decide(conn, args.pack_id, args.provider, args.model)
         if args.task == "show":
             if not args.pack_id:
                 log.error("--pack-id 가 필요하다")
