@@ -128,7 +128,7 @@ Claude API 정가 기준 **3개월 총 $60~170** 규모다. [ADR 0003](0003-ai-d
 
 ## 함께 확정하는 것
 
-### 스키마 개정 (선행 작업)
+### 스키마 개정 (선행 작업) *(구현 완료 2026-08-30)*
 
 [CLAUDE.md](../../CLAUDE.md) 판단 계층 규칙이 **"스키마를 먼저 고친다"** 이다. 판단 엔진 코드보다 이것이 먼저다.
 
@@ -205,7 +205,7 @@ API 의 `output_config.format`(JSON 스키마 강제)에 `decision.schema.json` 
 
 프롬프트 파일에는 휘발성 값(날짜·시각·계좌 숫자)을 넣지 않는다 — 전부 팩에 있다. [CLAUDE.md](../../CLAUDE.md) 하드 규칙 3(리스크 한도 값 저장소 금지)이 프롬프트 파일에도 적용된다. 한도는 팩의 `constraints` 로 전달되지 프롬프트에 적지 않는다.
 
-### 선행 조치 — 팩을 불변으로 만든다
+### 선행 조치 — 팩을 불변으로 만든다 *(구현 완료 2026-08-30)*
 
 `decision/pack.py` 의 `save()` 가 `ON CONFLICT(pack_id) DO UPDATE SET ... payload=excluded.payload` 다. `pack_id` 는 `YYYYMMDD-HHMM-cycle`(분 단위)이므로 **같은 분에 재빌드하면 payload 가 조용히 덮인다.**
 
