@@ -39,9 +39,24 @@ TOKEN_URL = "/oauth2/token"
 STOCK_INFO_TR = "ka10001"  # 주식기본정보요청
 STOCK_INFO_PATH = "/api/dostk/stkinfo"
 
-# 실측(2026-08-30): 동시 발사 시 통과 10~11건. 문서상 "초당 5회"의 두 배다.
-# 분·시간 누적 한도는 없다. 경계에 붙지 않게 8 로 둔다 — 12 에서는 24건 중 2건이 429 였다.
+# 유량은 **실전과 모의가 다르다.** 실측(2026-08-30):
+#
+#   실전  동시 발사 통과 10~11건 · 5회/초 지속 300회 전부 통과 · 분·시간 누적 한도 없음
+#   모의  동시 발사 통과 **3건 고정**(6에서도 3, 12에서도 3) · 지속은 **약 2콜/초 상한**
+#         (3회/초·4회/초 모두 실효 2.0 으로 수렴)
+#
+# 문서는 모의를 "TR당 초당 1회"라고 적었는데 실측은 그보다 관대하다. 그래도 실전의
+# 약 1/3.5 다 — 실전 기준 동시성을 모의에 그대로 쓰면 8건 중 5~6건이 429 가 된다.
+# **제약은 동시성이 아니라 속도다.** 동시 2 라도 RTT 가 0.7초면 초당 2.8회가 나가
+# 모의의 지속 상한 2 를 넘는다 — 실제로 그렇게 해서 20종목 중 1종목이 429 였다.
+# 그래서 모의에서는 호출 사이 최소 간격을 강제한다(2콜/초 = 0.5초).
 MAX_CONCURRENCY = 8
+MIN_INTERVAL_SEC = 0.0  # 실전은 동시성으로만 제어한다
+
+MOCK_MAX_CONCURRENCY = 2
+MOCK_MIN_INTERVAL_SEC = 0.55  # 2콜/초에 여유를 조금 둔다
+
+MOCK_HOST_MARK = "mockapi"
 
 # 429 는 지속되지 않는다 — 실측(2026-08-30 B3): 다음 호출이 0.9초(RTT 1회분) 만에 통과했다.
 # 하드 게이트가 아니라 짧은 재시도로 충분하다는 뜻이다.
@@ -106,6 +121,13 @@ class KiwoomClient:
 
     def __init__(self, base: str | None = None, http=None):
         self.base = (base or os.getenv("KIWOOM_REST_BASE") or "").rstrip("/")
+        # 모의 서버는 유량이 다르다. 엔드포인트로 판정한다 — KIWOOM_ENV 는 읽는 코드가
+        # 따로 없어 믿을 수 없고, 실제로 어디에 쏘는지는 base 가 정한다.
+        self.is_mock = MOCK_HOST_MARK in self.base
+        self.max_workers = MOCK_MAX_CONCURRENCY if self.is_mock else MAX_CONCURRENCY
+        self.min_interval = MOCK_MIN_INTERVAL_SEC if self.is_mock else MIN_INTERVAL_SEC
+        self._pace_lock = threading.Lock()
+        self._last_call = 0.0
         self._http = http
         self._token: str | None = None
         self._expires: datetime | None = None
@@ -145,11 +167,22 @@ class KiwoomClient:
             self._expires = _parse_expires(j.get("expires_dt")) or now + timedelta(hours=12)
             return tok
 
+    def _pace(self) -> None:
+        """호출 사이 최소 간격을 지킨다. 간격이 0 이면 아무것도 하지 않는다."""
+        if not self.min_interval:
+            return
+        with self._pace_lock:
+            wait = self._last_call + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
+
     # ── 현재가 ──────────────────────────────────────────
 
     def spot(self, code: str) -> SpotQuote | None:
         """한 종목의 현재가. 응답이 이상하면 **None 이 아니라 예외**로 알린다."""
         for attempt in range(RETRY_ON_429 + 1):
+            self._pace()
             r = self._client().post(
                 f"{self.base}{STOCK_INFO_PATH}",
                 headers={
@@ -207,7 +240,7 @@ class KiwoomClient:
             else:
                 failed[code] = "현재가 없음 (거래정지·상장폐지 등)"
 
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as ex:
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, max(1, len(codes)))) as ex:
             list(ex.map(one, codes))
         return ok, failed
 
