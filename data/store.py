@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -195,6 +195,47 @@ CREATE TABLE IF NOT EXISTS context_packs (
 );
 CREATE INDEX IF NOT EXISTS idx_pack_cycle ON context_packs(cycle, generated_at);
 
+-- ── 결정 (append-only, 감사 추적) ───────────────────────
+-- ADR 0007 결정 3. INSERT 만 존재한다 — UPDATE·DELETE 경로를 만들지 않고
+-- 그 부재를 테스트로 고정한다. 잘못된 행도 영구히 남고, 정정은 새 행으로 한다.
+--
+-- rendered_input 을 통째로 저장하는 이유가 R6 의 교훈이다. 프롬프트 해시와
+-- 렌더러 버전만 있으면 이론상 재구성이 되지만, 재구성 코드가 돌아가면서 다른 것을
+-- 만들어도 알 수 없다. 실제 보낸 바이트가 있어야 재현 검사가 성립한다.
+--
+-- raw_response 를 payload 와 따로 두는 이유는 11.6 이다 — 파서가 근거 든 쪽을
+-- 버렸을 때 원문이 남아 있어 오진을 뒤집을 수 있었다.
+CREATE TABLE IF NOT EXISTS decisions (
+    decision_id    TEXT NOT NULL,       -- (pack_id, arm) 당 하나. 재시도가 재사용한다
+    attempt        INTEGER NOT NULL,    -- 1부터. 재시도도 전부 남는다
+    pack_id        TEXT NOT NULL,
+    pack_sha256    TEXT NOT NULL,       -- 팩이 덮였는지 사후 검출용
+    arm            INTEGER NOT NULL,    -- 0=정량 / 1=브리핑 포함 / 2=브리핑 제외
+    cycle          TEXT NOT NULL,
+    generated_at   TEXT NOT NULL,
+    valid_until    TEXT NOT NULL,       -- 이 시각 이후 집행 금지
+    model          TEXT,                -- arm 0 은 NULL
+    prompt_id      TEXT,
+    prompt_sha256  TEXT,
+    render_version TEXT NOT NULL,
+    api_params     TEXT,                -- JSON. 같은 프롬프트라도 effort 가 다르면 다른 함수다
+    rendered_input TEXT,                -- 모델에 실제로 보낸 입력 전문
+    raw_response   TEXT,                -- 모델 원문. 파싱 전
+    payload        TEXT,                -- 계약을 통과한 결정 JSON. 실패면 NULL
+    status         TEXT NOT NULL,       -- ok|abstain|schema_rejected|contract_rejected
+                                        -- |api_error|timeout|expired
+    problems       TEXT,                -- JSON 배열. 거부 사유
+    monitorable    INTEGER,             -- 감시 가능한 invalidation 건수
+    unmonitorable  INTEGER,             -- 감시 불가 건수. 높아지면 enum 을 재검토한다
+    request_id     TEXT,
+    input_tokens   INTEGER,
+    output_tokens  INTEGER,
+    latency_ms     INTEGER,
+    PRIMARY KEY (decision_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_dec_pack ON decisions(pack_id, arm);
+CREATE INDEX IF NOT EXISTS idx_dec_time ON decisions(generated_at, arm);
+
 -- 배치 실행 기록. 어떤 날 무엇이 실패했는지 남지 않으면 결손을 발견할 수 없다.
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,6 +343,7 @@ _MIGRATIONS: dict[int, object] = {
     6: _migrate_v6,  # disclosures.disqualifying·resolving 추가 + 기존 행 재판정
     7: _migrate_v7,  # 업종 대분류 규칙 확장 → 기존 행 재분류
     8: _migrate_v8,  # is_managed_known 분리 (판정 못한 것을 정상으로 두지 않는다)
+    9: "",  # decisions 테이블 추가 — _SCHEMA 재실행으로 충분
 }
 
 

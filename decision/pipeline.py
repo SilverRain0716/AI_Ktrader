@@ -3,6 +3,7 @@
 사용:
     python -m decision.pipeline build --cycle premarket
     python -m decision.pipeline build --cycle event --code 005930 --trigger invalidation_hit
+    python -m decision.pipeline decide --pack-id 20260821-0820-premarket   # Arm 1·2 짝
     python -m decision.pipeline show  --pack-id 20260821-0820-premarket
     python -m decision.pipeline status
 
@@ -18,7 +19,7 @@ import logging
 import sys
 
 from data import store
-from decision import config, pack
+from decision import config, engine, pack
 
 log = logging.getLogger("decision")
 
@@ -121,9 +122,59 @@ def task_status(conn) -> int:
     return 0 if limits_ok else 3
 
 
+def task_decide(conn, pack_id: str | None) -> int:
+    """Arm 1·2 를 같은 팩에 대해 짝으로 판단한다 (ADR 0005 3-arm).
+
+    한쪽만 실패하면 성공한 쪽은 쓰되 **쌍에서 제외**된다 — 짝 없는 관측을 쌍으로 세면
+    대응비교가 오염된다. 종료 코드 4 가 그 상태다.
+    """
+    if pack_id:
+        row = conn.execute(
+            "SELECT payload FROM context_packs WHERE pack_id=?", (pack_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT payload FROM context_packs ORDER BY generated_at DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        log.error("팩이 없다. `python -m decision.pipeline build` 를 먼저 돌려라.")
+        return 1
+
+    p = json.loads(row[0])
+    try:
+        out = engine.decide_pair(conn, p)
+    except engine.DecisionRefused as e:
+        log.error("%s", e)
+        return 3  # 설정 문제 (대개 ANTHROPIC_API_KEY)
+
+    for arm in (1, 2):
+        r = out.get(f"arm{arm}")
+        if r is None:
+            log.error("  arm %d — 실패. decisions 테이블에서 시도 기록을 확인하라", arm)
+            continue
+        payload = json.loads(r["payload"])
+        n = len(payload.get("decisions", []))
+        log.info(
+            "  arm %d — %s · 결정 %d건 · 감시가능 %s/%s · %s토큰",
+            arm,
+            r["status"],
+            n,
+            r.get("monitorable"),
+            n,
+            (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
+        )
+        if r.get("unmonitorable"):
+            log.warning("  arm %d — 감시 불가한 invalidation %d건", arm, r["unmonitorable"])
+
+    if not out["paired"]:
+        log.warning("한쪽 arm 이 실패해 **대응비교 쌍에서 제외**된다.")
+        return 4
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="decision.pipeline", description="컨텍스트 팩 배치")
-    p.add_argument("task", choices=["build", "show", "status"])
+    p.add_argument("task", choices=["build", "decide", "show", "status"])
     p.add_argument("--cycle", choices=list(config.CYCLES), default="premarket")
     p.add_argument("--trigger", default=None, help="event 사이클의 트리거 종류")
     p.add_argument("--code", default=None)
@@ -144,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             return task_build(
                 conn, cycle=args.cycle, trigger=args.trigger, code=args.code, detail=args.detail
             )
+        if args.task == "decide":
+            return task_decide(conn, args.pack_id)
         if args.task == "show":
             if not args.pack_id:
                 log.error("--pack-id 가 필요하다")
