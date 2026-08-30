@@ -175,6 +175,11 @@ def _sessions_missed(conn: sqlite3.Connection, last: str, as_of: date) -> int:
         "SELECT COUNT(DISTINCT date) FROM ohlcv WHERE code IN (?, ?) AND date > ? AND date <= ?",
         (*dcfg.INDEX_SYMBOLS.values(), last, as_of.isoformat()),
     ).fetchone()
+    # `row[0]` 이 0 일 때 달력 폴백으로 넘어가는 것은 **의도된 보수성**이다.
+    # 0 은 "장이 한 번도 안 섰다"와 "지수 데이터도 같이 낡았다"를 구분하지 못한다 —
+    # 후자라면 실제로는 며칠씩 낡은 것이므로, 구분이 안 될 때는 낡은 쪽으로 판정한다.
+    # (한 번 이것을 "버그"로 보고 0 을 그대로 돌려주게 고쳤다가
+    #  test_실제로_낡으면_여전히_거부한다 가 잡았다. 고치지 말 것.)
     if row and row[0]:
         return int(row[0])
     days = (as_of - date.fromisoformat(last)).days
@@ -224,9 +229,9 @@ def _data_quality(
     row = conn.execute("SELECT MAX(date) FROM flows").fetchone()
     flows_as_of = row[0] if row and row[0] else None
     if flows_as_of:
-        fstale = (as_of - date.fromisoformat(flows_as_of)).days
-        if fstale > config.MAX_FLOWS_STALE_DAYS:
-            warnings.append(f"수급 데이터가 {fstale}일 낡음 (최신 {flows_as_of})")
+        fstale = _sessions_missed(conn, flows_as_of, as_of)
+        if fstale > config.MAX_FLOWS_STALE_SESSIONS:
+            warnings.append(f"수급 데이터가 거래일 {fstale}회분 낡음 (최신 {flows_as_of})")
     else:
         warnings.append("수급 데이터 없음 — flow 채널이 비어 있다")
 

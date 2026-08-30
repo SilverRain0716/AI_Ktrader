@@ -1029,3 +1029,56 @@ def test_손실한도는_실제로_걸린다(db, monkeypatch):
     monkeypatch.setenv("AIK_DAILY_LOSS_LIMIT_KRW", "9000000")
     p2 = pack.build(db, cycle="premarket", generated_at=NOW)
     assert p2["constraints"]["daily_loss_limit_hit"] is False
+
+
+def test_수급_신선도는_거래일_기준이다(tmp_path) -> None:
+    """달력일로 세면 매주 월요일마다 경고가 떴다 — 금요일이 마지막 거래일이라 3일 낡음이 된다.
+
+    일봉이 이미 겪고 고친 문제(11.9)가 수급에만 남아 있었다. 같은 함수를 쓰게 했다.
+    """
+    from datetime import date
+
+    from data import store
+    from decision import config, pack
+
+    assert not hasattr(config, "MAX_FLOWS_STALE_DAYS"), "달력일 상수가 남아 있다"
+
+    with store.connect(tmp_path / "t.db") as conn:
+        store.init_db(conn)
+        for d in ("2026-08-26", "2026-08-27", "2026-08-28"):
+            conn.execute(
+                "INSERT INTO ohlcv "
+                "(code,date,open,high,low,close,volume,halted,source,adjusted) "
+                "VALUES ('KOSPI',?,1,1,1,1,1,0,'test',1)",
+                (d,),
+            )
+        # 금(8/28) 마감 뒤 월(8/31) 아침. 달력일이면 3, 거래일 기준이면 1 이하다.
+        missed = pack._sessions_missed(conn, "2026-08-28", date(2026, 8, 31))
+
+    assert missed <= config.MAX_FLOWS_STALE_SESSIONS, (
+        f"금→월이 {missed} 회로 나와 경고가 뜬다 (달력일이면 3)"
+    )
+
+
+def test_지수가_낡으면_보수적으로_판정한다(tmp_path) -> None:
+    """지수 봉 0개는 "장이 안 섰다"와 "지수도 같이 낡았다"를 구분하지 못한다.
+
+    구분이 안 될 때는 낡은 쪽으로 본다 — `if row[0]:` 의 달력 폴백이 그 장치다.
+    한 번 이것을 버그로 보고 0 을 그대로 돌려주게 고쳤다가
+    `test_실제로_낡으면_여전히_거부한다` 가 잡았다.
+    """
+    from datetime import date
+
+    from data import store
+    from decision import pack
+
+    with store.connect(tmp_path / "a.db") as conn:
+        store.init_db(conn)
+        conn.execute(
+            "INSERT INTO ohlcv "
+            "(code,date,open,high,low,close,volume,halted,source,adjusted) "
+            "VALUES ('KOSPI','2026-08-21',1,1,1,1,1,0,'test',1)"
+        )
+        # 지수가 8/21 에 멈춰 있고 오늘은 8/27 — 그 사이 장은 실제로 섰다.
+        # 지수 봉이 없다고 "0 회 지남"으로 읽으면 낡은 데이터가 최신으로 통과한다.
+        assert pack._sessions_missed(conn, "2026-08-21", date(2026, 8, 27)) > 0
