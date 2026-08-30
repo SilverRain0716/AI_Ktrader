@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 
 from data import config as dcfg
 from data import store
-from decision import config, positions, universe
+from decision import config, contract, positions, universe
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "context_pack
 # RiskLimitError 를 그 하위로 두려면 부모가 아래쪽에 있어야 했다.
 # 기존 `from decision.pack import PackRefused` 는 그대로 동작한다.
 PackRefused = config.PackRefused
+PackImmutable = config.PackImmutable
 
 
 def _validator() -> Draft202012Validator:
@@ -390,16 +391,30 @@ def build(
 
 
 def save(conn: sqlite3.Connection, pack: dict) -> None:
+    """팩을 저장한다. **이미 있는 팩을 다른 내용으로 덮어쓰지 않는다.**
+
+    `pack_id` 는 분 단위(`YYYYMMDD-HHMM-cycle`)라 같은 분에 재빌드하면 같은 id 가 나온다.
+    예전에는 `ON CONFLICT DO UPDATE` 로 payload 를 조용히 덮었다. 지금은 결정이 팩을
+    참조할 예정이므로(ADR 0007) 그 경로를 막는다.
+
+    같은 내용의 재빌드는 통과시킨다 — 개발 중 두 번 돌리는 것을 실패로 만들 이유가 없고,
+    막아야 할 것은 **근거가 바뀌는 것**이지 재실행이 아니다.
+    """
+    row = conn.execute(
+        "SELECT payload FROM context_packs WHERE pack_id=?", (pack["pack_id"],)
+    ).fetchone()
+    if row is not None:
+        if contract.canonical_sha256(json.loads(row[0])) == contract.canonical_sha256(pack):
+            return  # 같은 내용 — 재빌드는 무해하다
+        raise PackImmutable(
+            f"팩 {pack['pack_id']} 이 이미 다른 내용으로 저장돼 있다. "
+            "팩은 판단의 근거이므로 덮어쓰지 않는다. 다시 만들려면 다음 분에 돌려라."
+        )
     conn.execute(
         """INSERT INTO context_packs
            (pack_id,cycle,generated_at,universe_size,position_count,view_count,
             warning_count,est_tokens,payload)
-           VALUES (?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(pack_id) DO UPDATE SET
-             generated_at=excluded.generated_at, universe_size=excluded.universe_size,
-             position_count=excluded.position_count, view_count=excluded.view_count,
-             warning_count=excluded.warning_count, est_tokens=excluded.est_tokens,
-             payload=excluded.payload""",
+           VALUES (?,?,?,?,?,?,?,?,?)""",
         (
             pack["pack_id"],
             pack["cycle"],
