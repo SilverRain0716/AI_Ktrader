@@ -77,7 +77,7 @@ K-Trader는 **설계 원칙의 참고 자산**으로 쓴다. 무엇을 계승하
 | 1b | DART 공시 적재, 분봉 적재(키움 REST) | ✅ 공시 완료 / 분봉 대기 — **소급 가능이 확인돼 '일일' 이 아니어도 된다**(D2) |
 | 2 | 브리핑 구조화 — 기존 아카이브 파싱 → JSON | ✅ 완료 |
 | 3 | 백테스트 엔진 — **정량 전용(Arm 0)**. 갭·슬리피지·거래세·거래정지 반영, walk-forward | 🔸 범위 확정([ADR 0005](docs/adr/0005-backtest-scope.md)) / 선결 과제 4건 |
-| 4 | AI 판단 엔진 — 컨텍스트 팩 + 출력 스키마 + 페이퍼 실행 | 🔸 컨텍스트 팩·출력 스키마 완료 / 판단 엔진 대기 |
+| 4 | AI 판단 엔진 — 컨텍스트 팩 + 출력 스키마 + 페이퍼 실행 | 🔸 **판단 엔진·결정 저장소 완료(2026-08-30)** / Arm 0 랭킹 규칙 미정 · 페이퍼 집행기 대기 |
 | 5 | **페이퍼 forward test — 3-arm 대응비교, 최소 3개월** | |
 | 6 | 실행 계층 + 검증 게이트 + 모의투자 주문 | |
 | 7 | 소액 실계좌 → 한도 상향 → 완전 자동 | |
@@ -138,6 +138,7 @@ python -m briefing.pipeline map-codes   # 종목명 → 6자리 코드
 python -m briefing.pipeline reparse     # 파서 규칙 변경 후 기존 관점 재판정
 
 python -m decision.pipeline build --cycle premarket   # 컨텍스트 팩 생성
+python -m decision.pipeline decide                    # Arm 1·2 판단 (ANTHROPIC_API_KEY 필요)
 python -m decision.pipeline status
 ```
 

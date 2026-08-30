@@ -25,7 +25,7 @@
 **그래서 작업 규칙이 하나 있다.**
 
 고칠 때마다 **"그 상태로 되돌아가는 경로"를 실패하는 테스트로 막는다.**
-현재 290건의 절반 이상이 그 목적으로 추가된 것이다.
+현재 329건의 절반 이상이 그 목적으로 추가된 것이다.
 값을 고쳤으면 그 값이 다시 틀렸을 때 빨간불이 켜지는지 **직접 확인**한다 — 통과하는 것을 보는 것으로는 부족하다.
 
 ---
@@ -63,7 +63,7 @@ pre-commit install          # gitleaks · ruff · .env 차단
 **커밋 전 검증 4종:**
 
 ```bash
-pytest -q                          # 290 passed
+pytest -q                          # 329 passed
 ruff check . && ruff format --check .
 python scripts/validate_schemas.py
 mypy .                             # CI 에 없다. 대부분 스텁 누락 노이즈 — 건수가 늘지 않는지만 본다
@@ -117,11 +117,14 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 
 ## 지금 없는 것
 
-`execution/` 과 `backtest/` 는 `.gitkeep` 뿐이다. 판단 엔진·결정 저장소·검증 게이트·주문·스케줄러·알림이 전부 0줄이다.
+`execution/` 과 `backtest/` 는 `.gitkeep` 뿐이다. **주문·스케줄러·알림·실시간 감시가 0줄이다.**
+
+판단 엔진과 결정 저장소는 2026-08-30 에 생겼다(`decision/engine.py`, `decisions` 테이블) — 돌리려면 `ANTHROPIC_API_KEY` 가 필요하다. **Arm 0(정량 랭킹)은 미구현이다** — ADR 0005 선결 과제 4가 풀리기 전까지 랭킹 규칙이 정의되지 않았고, 임의로 정하면 그것이 기준선이 된다.
 
 **있어 보이지만 배선되지 않은 것들이 있다.** 손대기 전에 확인한다.
 
 - `KILL_SWITCH` · `EXECUTION_MODE` — `.env.example` 에만 있고 **읽는 코드가 없다**
+- `recent_decisions` 팩 블록 — `decisions` 테이블은 생겼지만 팩에 채우는 배선은 아직 없다
 - `decision.schema.json` — 142줄인데 **생산자도 인스턴스 검증자도 없다**
 - `constraints` — 팩에 실려 AI 에게 통보될 뿐 **강제되지 않는다**
 - `invalidation_hit` — 1로 바꾸는 UPDATE 가 없다. **자유 텍스트는 기계가 감시할 수 없다** — ADR 0007 이 조건 문법으로 바꾼다
