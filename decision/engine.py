@@ -50,12 +50,18 @@ API_PARAMS: dict[str, Any] = {
 MAX_ATTEMPTS = 3  # 스키마·계약 위반 재요청 포함
 
 # 사이클별 결정 유효 시각 (KST 기준 시:분). 이 시각을 넘겨 도착한 판단은 집행하지 않는다.
+#
+# **15:20 은 정규장 접속매매가 끝나는 시각이다.** 15:20~15:30 은 종가 단일가(동시호가)라
+# 연속 체결이 없다 — 지정가·조건부 진입 지시가 그 구간에서 의도대로 동작하지 않는다.
+# 설계안 v1 4.3 의 실행 창(09:00~15:20)과 4.4 의 스키마 예시가 둘 다 15:20 이다.
 CYCLE_VALID_UNTIL = {
-    "premarket": (15, 30),
-    "midday": (15, 30),
-    "preclose": (15, 30),
-    "postmarket": (9, 5),  # 다음 거래일 개장 직후
-    "event": (15, 30),
+    "premarket": (15, 20),
+    "midday": (15, 20),
+    "preclose": (15, 20),
+    # 18:30 은 복기 사이클이다(설계안 4.3) — 주문을 내지 않는다. 그럼에도 결정이 나온다면
+    # 다음 거래일 개장 직후까지만 유효하다. **이 값은 설계에 없는 임시값이다.**
+    "postmarket": (9, 5),
+    "event": (15, 20),
 }
 
 
@@ -258,7 +264,7 @@ def _liquidity_problems(entries, universe, pack_input, con) -> list[str]:
 
 
 def _valid_until(cycle: str, now: datetime) -> str:
-    hh, mm = CYCLE_VALID_UNTIL.get(cycle, (15, 30))
+    hh, mm = CYCLE_VALID_UNTIL.get(cycle, (15, 20))
     end = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if end <= now:
         end += timedelta(days=1)

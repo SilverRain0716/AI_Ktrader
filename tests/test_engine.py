@@ -341,3 +341,24 @@ def test_arm_0_은_아직_없다(conn) -> None:
     """Arm 0 의 랭킹 규칙이 정의되지 않았다. 임의로 정하면 그것이 기준선이 된다."""
     with pytest.raises(engine.DecisionRefused, match="arm=0"):
         engine.pack_for_arm(_pack(), 0)
+
+
+def test_결정_만료는_접속매매_종료_시각이다(conn) -> None:
+    """15:20 이후는 종가 단일가라 연속 체결이 없다 — 지정가·조건부 진입이 의도대로 안 된다.
+
+    설계안 v1 4.3 실행 창과 4.4 스키마 예시가 둘 다 15:20 이다. 한때 15:30 이었고,
+    그 10분은 시간 차이가 아니라 **체결 방식의 차이**다.
+    """
+    from datetime import datetime
+
+    from data import config as dcfg
+
+    for cycle in ("premarket", "midday", "preclose", "event"):
+        assert engine.CYCLE_VALID_UNTIL[cycle] == (15, 20), cycle
+
+    client = FakeClient(_resp(_payload()))
+    pack = {**_pack(), "cycle": "premarket"}
+    row = engine.decide(
+        conn, pack, 1, client=client, now=datetime(2026, 8, 31, 8, 20, tzinfo=dcfg.KST)
+    )
+    assert row["valid_until"].startswith("2026-08-31T15:20")
