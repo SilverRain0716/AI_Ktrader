@@ -105,11 +105,13 @@ def test_스냅샷을_쌓고_최신만_조회한다(db, tmp_path) -> None:
 
     # 최신 스냅샷만 본다
     assert margin.latest_as_of(db) == "2026-09-01"
-    assert dict(db.execute("SELECT code,margin_pct FROM margin_grades WHERE as_of='2026-09-01'")) == {
-        "000270": 100
-    }
+    assert dict(
+        db.execute("SELECT code,margin_pct FROM margin_grades WHERE as_of='2026-09-01'")
+    ) == {"000270": 100}
     # 옛 스냅샷은 남아 있다
-    assert dict(db.execute("SELECT code,margin_pct FROM margin_grades WHERE as_of='2026-08-31'")) == {
+    assert dict(
+        db.execute("SELECT code,margin_pct FROM margin_grades WHERE as_of='2026-08-31'")
+    ) == {
         "000270": 20,
         "005930": 20,
     }
