@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 
 from data import config as dcfg
 from data import store
-from data.sources import kiwoom
+from data.sources import kiwoom, naver_news
 from decision import config, contract, positions, universe
 
 log = logging.getLogger(__name__)
@@ -289,6 +289,90 @@ def estimate_tokens(payload: dict) -> int:
     return int(len(json.dumps(payload, ensure_ascii=False)) / config.CHARS_PER_TOKEN)
 
 
+# ── 컨텍스트 부착 (공시·뉴스) ───────────────────────────
+#
+# 둘 다 **후보를 만들지 않는다.** 이미 유니버스에 오른 종목에 붙을 뿐이다 (ADR 0010).
+# 채널을 늘리는 것과 이미 고른 종목을 더 잘 아는 것은 다른 일이고,
+# ADR 0006 이 막아 둔 것은 앞쪽이다.
+#
+# Arm 1·2 **양쪽에 똑같이** 실린다 — 뉴스·공시는 봉투이고 브리핑이 측정 대상이다.
+# 그래서 `derive_arm2()` 가 이 블록들을 건드리지 않는다.
+
+DISCLOSURE_LOOKBACK_DAYS = 14
+MAX_DISCLOSURES_PER_STOCK = 4
+
+
+def attach_disclosures(conn: sqlite3.Connection, items: list[dict], as_of: date) -> int:
+    """유니버스 종목의 최근 공시를 붙인다.
+
+    예전에는 공시를 **거르는 데만** 썼다 — 28,970건을 적재해 놓고 AI 는 한 건도 볼 수
+    없었다. 'IR 개최'·'단일판매공급계약' 같은 사건이 판단에 닿지 않았다.
+    """
+    if not items:
+        return 0
+    codes = [i["code"] for i in items]
+    since = (as_of - timedelta(days=DISCLOSURE_LOOKBACK_DAYS)).strftime("%Y%m%d")
+    rows = conn.execute(
+        f"SELECT code, rcept_dt, report_nm, disqualifying FROM disclosures "
+        f"WHERE code IN ({','.join('?' * len(codes))}) AND rcept_dt >= ? AND rcept_dt <= ? "
+        f"ORDER BY rcept_dt DESC",
+        (*codes, since, as_of.strftime("%Y%m%d")),
+    ).fetchall()
+
+    by_code: dict[str, list[dict]] = {}
+    for code, dt, nm, bad in rows:
+        bucket = by_code.setdefault(code, [])
+        if len(bucket) >= MAX_DISCLOSURES_PER_STOCK:
+            continue
+        bucket.append(
+            {
+                "at": f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}",
+                "report_nm": (nm or "")[:120],
+                "disqualifying": bool(bad),
+            }
+        )
+    for it in items:
+        it["disclosures"] = by_code.get(it["code"], [])
+    return sum(len(v) for v in by_code.values())
+
+
+def attach_news(items: list[dict], dq: dict, *, now: datetime, client=None) -> None:
+    """유니버스 종목의 최근 뉴스를 붙인다.
+
+    **못 받으면 받은 척하지 않는다** — `data_quality.news_as_of` 가 null 이 되고
+    경고가 남는다. 장중 현재가와 같은 규칙이다.
+    """
+    if not items:
+        dq["news_as_of"] = None
+        return
+    pairs = [(i["code"], i.get("name")) for i in items]
+    try:
+        got, failed = naver_news.for_universe(pairs, as_of_iso=now.isoformat(), client=client)
+    except Exception as e:  # 수집 자체가 죽어도 팩은 만든다 — 다만 조용히는 아니다
+        dq["news_as_of"] = None
+        dq["warnings"].append(
+            f"뉴스를 수집하지 못했다 ({type(e).__name__}) — 당일 이슈가 팩에 없다"
+        )
+        log.warning("뉴스 수집 실패: %s", e)
+        return
+    if not got:
+        # 한 종목도 못 받았는데 수집 시각을 찍으면 "수집했다"고 말하는 셈이다.
+        dq["news_as_of"] = None
+        dq["warnings"].append(
+            f"뉴스를 한 종목도 받지 못했다 ({len(failed)}종목 전부 실패) — 당일 이슈가 팩에 없다"
+        )
+        log.warning("뉴스 전량 실패: %s", dict(list(failed.items())[:3]))
+        return
+    for it in items:
+        it["news"] = got.get(it["code"], [])
+    dq["news_as_of"] = now.isoformat(timespec="seconds")
+    if failed:
+        dq["warnings"].append(
+            f"뉴스 {len(failed)}종목 결손 — 그 종목은 당일 이슈 없이 판단된다 "
+            f"({', '.join(list(failed)[:3])})"
+        )
+
+
 # ── 장중 현재가 덮어쓰기 ────────────────────────────────
 
 # 장이 열려 있는 사이클. premarket 은 개장 전이므로 전일 종가가 **맞는** 값이고,
@@ -358,6 +442,8 @@ def build(
     generated_at: datetime | None = None,
     event_trigger: dict | None = None,
     spot_client=None,
+    news_client=None,
+    with_news: bool = False,
 ) -> dict:
     if cycle not in config.CYCLES:
         raise ValueError(f"알 수 없는 사이클: {cycle}")
@@ -445,6 +531,15 @@ def build(
     }
     if event_trigger:
         pack["event_trigger"] = event_trigger
+
+    # 공시는 DB 에서 오므로 항상 붙인다. 뉴스는 네트워크를 타므로 **기본이 꺼져 있다** —
+    # 라이브러리가 부르는 것만으로 외부 호출이 나가면 테스트가 느려지고 불안정해진다.
+    # 켜는 것은 CLI 의 몫이다.
+    attach_disclosures(conn, pack["universe"], as_of)
+    if with_news:
+        attach_news(pack["universe"], dq, now=now, client=news_client)
+    else:
+        dq["news_as_of"] = None
 
     _overlay_spot(pack, cycle, client=spot_client)
 
