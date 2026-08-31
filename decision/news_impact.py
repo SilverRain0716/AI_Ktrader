@@ -57,14 +57,133 @@ _FUNNEL = re.compile(
 )
 
 
-def passes_funnel(headline: str, names_stock: bool) -> bool:
+def passes_funnel(headline: str) -> bool:
     """1단계. **놓치지 않는 것이 목적이고 맞히는 것이 아니다.**
 
-    `names_stock` 을 요구하므로 *"SK온, 美 네오볼타에 9GWh 공급"* 은 **탈락한다** —
-    이 ADR 을 촉발한 사례가 자기 규칙에 걸린다. 계열사 사전이 생기기 전까지
-    감수하는 비용이고, 그런 항목은 관측 통로로 따로 남긴다(ADR 0012 결정 7).
+    처음에 `names_stock` 을 **함께 요구했다가 뺐다.** 세 가지가 동시에 틀렸다.
+
+    1. **[ADR 0010](../docs/adr/0010-news-and-context.md) 을 어겼다.** 거기서 *"거르지 않고
+       `names_stock` 으로 표시만 한다"* 고 정해 놓고 여기서 게이트로 썼다.
+    2. **약칭을 통째로 버렸다.** 실측에서 버려진 것들: *"삼바, M&A 위해 3조원 유증"*,
+       *"한화에어로 … 자회사에 2200억 수혈"*. 증권 기사는 약칭을 쓴다.
+    3. **`attributed` 의 존재 이유를 지웠다.** 재료가 이 종목 것인지 묻는 필드를 만들어 놓고
+       그 판단을 1단계에서 미리 해버렸다.
+
+    비용은 재보지도 않고 걸었던 것이다. 실측하니 통과율 11.8% → 28.0%,
+    662종목 환산 235건 → 555건, 추가 약 9,600 토큰이었다.
+
+    `names_stock` 은 버리지 않고 **판정 입력으로 AI 에게 준다.**
     """
-    return bool(names_stock) and bool(_FUNNEL.search(headline))
+    return bool(_FUNNEL.search(headline))
+
+
+# ── 계열사 귀속 ─────────────────────────────────────────
+#
+# 한글 자모 이름 표. **손으로 만든 별칭 목록이 아니다** — '에스케이'→'SK' 는 규칙이고,
+# 별칭 목록은 새 회사가 나올 때마다 손이 가고 빠뜨린 것을 아무도 모른다.
+_LETTER = {
+    "에이": "A",
+    "비": "B",
+    "씨": "C",
+    "디": "D",
+    "이": "E",
+    "에프": "F",
+    "지": "G",
+    "에이치": "H",
+    "아이": "I",
+    "제이": "J",
+    "케이": "K",
+    "엘": "L",
+    "엠": "M",
+    "엔": "N",
+    "오": "O",
+    "피": "P",
+    "큐": "Q",
+    "알": "R",
+    "에스": "S",
+    "티": "T",
+    "유": "U",
+    "브이": "V",
+    "더블유": "W",
+    "엑스": "X",
+    "와이": "Y",
+    "제트": "Z",
+}
+_LETTER_KEYS = sorted(_LETTER, key=len, reverse=True)
+_LEGAL = re.compile(
+    r"\(주\d[^)]*\)|\(주\)|㈜|주식회사|유한회사|\(유\)"
+    r"|,?\s*(?:Inc|Ltd|Co|Corp|Corporation|Pte|Pty|LLC|GmbH)\.?",
+    re.I,
+)
+
+
+def _canon(name: str) -> str:
+    """법인격·괄호주석·공백을 걷어낸 표기."""
+    s = unicodedata.normalize("NFKC", name)
+    s = _LEGAL.sub("", s)
+    s = re.sub(r"\([^)]*\)", "", s)
+    return re.sub(r"[\s·\-_,]+", "", s).strip().upper()
+
+
+def name_variants(name: str) -> set[str]:
+    """표기 변형. **접두 길이별로 전부 만든다.**
+
+    한 번에 끝까지 음차하면 과적용된다 — '에스케이지오센트릭' 의 '지오' 가 'GO' 로 바뀌어
+    'SKGO센트릭' 이 되고, 기사에 쓰인 'SK지오센트릭' 과 어긋난다. 멈추는 지점마다
+    변형을 남기면 그중 하나가 맞는다.
+    """
+    base = _canon(name)
+    out = {base}
+    acc, i = "", 0
+    while i < len(base):
+        for k in _LETTER_KEYS:
+            if base.startswith(k.upper(), i):
+                acc += _LETTER[k]
+                i += len(k)
+                out.add(acc + base[i:])
+                break
+        else:
+            break
+    return {v for v in out if v}
+
+
+def resolve_ownership(
+    subject: str | None,
+    stock_name: str,
+    affiliates: dict[str, float | None],
+    other_listed: dict[str, str] | None = None,
+) -> tuple[float | None, str]:
+    """`subject` 가 누구인지 가려 **지분율(0~1)과 근거**를 돌려준다.
+
+    `affiliates` 는 그 종목의 자회사 `{DART 표기: 지분율 %}`,
+    `other_listed` 는 `{상장사명: 코드}` 다.
+
+    | 결과 | 근거 | 뜻 |
+    |---|---|---|
+    | 지분율 | `dart` | 자회사로 확인됨. SK온 → 0.903 |
+    | 1.0 | `self` | 종목 자신 |
+    | **None** | **`foreign`** | **다른 상장사의 재료다** |
+    | 1.0 | `assumed` | 못 가렸다. 약칭('삼바')은 사전으로 못 푼다 |
+
+    `foreign` 이 **실측된 오판을 막는 장치**다. 한미반도체 페이지의 *"SK하닉 5조 꽂은 이유는"*
+    에서 AI 가 `attributed` 를 잘못 내면 남의 5조가 이 종목 파급도가 된다. 자회사도
+    자신도 아닌데 **우리가 아는 다른 상장사 이름이면** 지분율을 None 으로 돌려
+    파급도 계산 자체를 막는다.
+
+    `assumed` 는 1.0 을 쓰되 **가정했다는 사실을 남긴다** — 실험 8 이 근거별로 갈라 봐야 한다.
+    """
+    if not subject:
+        return 1.0, "assumed"
+    sv = name_variants(subject)
+    if sv & name_variants(stock_name):
+        return 1.0, "self"
+    for inv_prm, rt in affiliates.items():
+        if sv & name_variants(inv_prm):
+            return (None if rt is None else max(0.0, min(rt, 100.0)) / 100.0), "dart"
+    for other in other_listed or {}:
+        if sv & name_variants(other):
+            return None, "foreign"
+    return 1.0, "assumed"
 
 
 def item_id(code: str, headline: str, at: str) -> str:
@@ -141,15 +260,28 @@ def _check_scale(j: dict, headline: str, iid: str) -> list[str]:
     return out
 
 
-def impact_pct(scale_eok_krw: float | None, market_cap_eok_krw: float | None) -> float | None:
-    """**파급도.** 시총 대비 재료 규모(%). 어느 한쪽이 없으면 None — 0 이 아니다.
+def impact_pct(
+    scale_eok_krw: float | None,
+    market_cap_eok_krw: float | None,
+    ownership: float | None = 1.0,
+) -> float | None:
+    """**파급도.** 시총 대비 재료 규모(%). 하나라도 없으면 None — 0 이 아니다.
 
     0 으로 채우면 *"재료가 없다"* 와 *"쟀는데 작다"* 가 같아진다. 이 저장소가
     반복해서 당한 실패 방식이다 — **못 받은 것을 받은 척하지 않는다.**
+
+    `ownership` 은 자회사 재료를 모회사 몫으로 줄인다. SK온 1.5조 수주는
+    SK이노베이션 지분 **90.3%**(DART 타법인출자현황) 이므로 1.354조로 본다.
+
+    **이것은 근사다.** 수주액은 매출이고 지분율은 순이익 귀속 비율이라 정확히는
+    맞지 않는다. 지분 30% 관계회사의 재료를 100% 로 세는 것보다 낫다는 뜻이지,
+    정밀한 계산이라는 뜻이 아니다.
     """
     if not scale_eok_krw or not market_cap_eok_krw or market_cap_eok_krw <= 0:
         return None
-    return round(scale_eok_krw / market_cap_eok_krw * 100, 3)
+    if ownership is None:
+        return None  # 지분율을 못 읽었다. 1.0 으로 넘기면 못 읽은 것이 100% 가 된다
+    return round(scale_eok_krw * ownership / market_cap_eok_krw * 100, 3)
 
 
 __all__ = [
@@ -157,5 +289,7 @@ __all__ = [
     "check_payload",
     "impact_pct",
     "item_id",
+    "name_variants",
     "passes_funnel",
+    "resolve_ownership",
 ]

@@ -79,31 +79,85 @@ def test_스키마_자체가_유효하다() -> None:
 
 
 @pytest.mark.parametrize(
-    ("headline", "names", "ok"),
+    ("headline", "ok"),
     [
-        ("삼성중공업, 컨테이너운반선 2척 4445억원 수주", True, True),
-        ("풍력터빈 기업 유니슨, 고창해상풍력에 1천억원 규모 공급", True, True),
-        ("삼성바이오로직스, 3조원대 유상증자 발표에 6%대↓[특징주]", True, True),
-        ("연준 의장 '매파' 본색에…코스피 2%대 하락", False, False),
-        ("가온전선, 싱가포르 600억 수주", True, True),
-        # 규모어도 금액도 없다
-        ("이동훈 SK바이오팜 사장, 오파칼림에 힘 싣는다", True, False),
+        ("삼성중공업, 컨테이너운반선 2척 4445억원 수주", True),
+        ("풍력터빈 기업 유니슨, 고창해상풍력에 1천억원 규모 공급", True),
+        ("삼성바이오로직스, 3조원대 유상증자 발표에 6%대↓[특징주]", True),
+        ("가온전선, 싱가포르 600억 수주", True),
+        ("연준 의장 '매파' 본색에…코스피 2%대 하락", False),
+        ("이동훈 SK바이오팜 사장, 오파칼림에 힘 싣는다", False),
     ],
 )
-def test_깔때기는_넓게_거른다(headline, names, ok) -> None:
-    assert ni.passes_funnel(headline, names) is ok
+def test_깔때기는_넓게_거른다(headline, ok) -> None:
+    assert ni.passes_funnel(headline) is ok
 
 
-def test_SK온_사례는_탈락한다() -> None:
-    """**이 ADR 을 촉발한 사례가 자기 규칙에 걸린다.**
+def test_계열사_기사를_버리지_않는다() -> None:
+    """**이 ADR 을 촉발한 사례다.** 처음에 names_stock 을 함께 요구해 탈락시켰다.
 
-    제목이 'SK온'이라 SK이노베이션(096770) 페이지에서 `names_stock=False` 다.
-    계열사 사전이 없어 감수하는 비용이고(ADR 0012 결정 7), 사전이 생기면 이 테스트가
-    바뀌어야 한다. **모르고 놓치는 것과 알고 놓치는 것을 구분하려고 못박는다.**
+    제목이 'SK온'이라 SK이노베이션 페이지에서 names_stock=False 인데, 게이트로 쓰면
+    ADR 0010 의 *"거르지 않고 표시만 한다"* 를 스스로 어기게 된다.
     """
-    h = "[속보] SK온, 美 네오볼타에 5년간 9GWh LFP 배터리 공급"
-    assert ni.passes_funnel(h, names_stock=False) is False
-    assert ni.passes_funnel(h, names_stock=True) is True, "규모어·물량은 잡혀야 한다"
+    assert ni.passes_funnel("[속보] SK온, 美 네오볼타에 5년간 9GWh LFP 배터리 공급")
+
+
+def test_약칭_기사를_버리지_않는다() -> None:
+    """실측에서 names_stock 게이트가 버린 것들. 증권 기사는 약칭을 쓴다."""
+    assert ni.passes_funnel("삼바, M&A 위해 3조원 유증 … 항체·mRNA 이어 영역 확대")
+    assert ni.passes_funnel("한화에어로 항공사업 속도..미국 엔진부품 자회사에 2200억 수혈")
+
+
+def test_깔때기는_종목명을_요구하지_않는다() -> None:
+    """게이트로 되돌아가는 경로를 막는다 — 인자로 받지도 않는다."""
+    import inspect
+
+    assert "names_stock" not in inspect.signature(ni.passes_funnel).parameters
+
+
+# ── 2-2. 계열사 귀속과 지분율 ───────────────────────────
+
+AFFIL = {"에스케이온(주) (주1,2)": 90.3, "에스케이지오센트릭(주) (주1)": 100.0}
+OTHERS = {"SK하이닉스": "000660", "삼성전자": "005930"}
+
+
+def test_음차로_계열사를_찾는다() -> None:
+    """DART 는 '에스케이온(주)', 기사는 'SK온' 이라고 쓴다."""
+    assert ni.resolve_ownership("SK온", "SK이노베이션", AFFIL, OTHERS) == (0.903, "dart")
+
+
+def test_음차가_과적용되지_않는다() -> None:
+    """'지오' 를 GO 로 바꾸면 'SKGO센트릭' 이 되어 기사의 'SK지오센트릭' 과 어긋난다.
+
+    접두 길이별 변형을 전부 만들어 그중 하나가 맞게 한다.
+    """
+    assert ni.resolve_ownership("SK지오센트릭", "SK이노베이션", AFFIL, OTHERS)[1] == "dart"
+
+
+def test_종목_자신은_self_다() -> None:
+    assert ni.resolve_ownership("SK이노베이션", "SK이노베이션", AFFIL, OTHERS) == (1.0, "self")
+
+
+def test_다른_상장사_재료는_파급도를_계산하지_않는다() -> None:
+    """실측된 오판: 한미반도체 페이지의 'SK하닉 5조 꽂은 이유는'.
+
+    AI 가 attributed 를 잘못 내도 남의 5조가 이 종목 파급도가 되면 안 된다.
+    """
+    own, src = ni.resolve_ownership("SK하이닉스", "SK이노베이션", AFFIL, OTHERS)
+    assert (own, src) == (None, "foreign")
+    assert ni.impact_pct(50000, 197623, own) is None
+
+
+def test_못_가리면_가정했다고_남긴다() -> None:
+    """약칭 '삼바' 는 사전으로 못 푼다. 1.0 을 쓰되 근거를 self 라고 속이지 않는다."""
+    assert ni.resolve_ownership("삼바", "삼성바이오로직스", {}, OTHERS) == (1.0, "assumed")
+
+
+def test_지분율을_못_읽으면_None_이다() -> None:
+    """0 으로도 1.0 으로도 채우지 않는다 — 못 읽은 것이 100% 가 되면 안 된다."""
+    own, src = ni.resolve_ownership("SK온", "SK이노베이션", {"에스케이온(주)": None}, OTHERS)
+    assert own is None and src == "dart"
+    assert ni.impact_pct(15000, 197623, own) is None
 
 
 # ── 3. item_id — 리플레이 가능성 ────────────────────────
@@ -216,6 +270,20 @@ def test_못_재면_None_이지_0_이_아니다(scale, cap) -> None:
     assert ni.impact_pct(scale, cap) is None
 
 
+def test_자회사_재료는_지분율로_줄인다() -> None:
+    """SK온 1.5조 × 지분 90.3% / 시총 19.76조 = 6.85%. 미조정이면 7.59% 다.
+
+    **근사다** — 수주액은 매출이고 지분율은 순이익 귀속 비율이다. 지분 30% 관계회사의
+    재료를 100% 로 세는 것보다 낫다는 뜻이지 정밀한 계산이라는 뜻이 아니다.
+    """
+    assert ni.impact_pct(15000, 197623, 0.903) == pytest.approx(6.85, abs=0.02)
+    assert ni.impact_pct(15000, 197623, 1.0) == pytest.approx(7.59, abs=0.02)
+
+
+def test_지분율이_None_이면_계산하지_않는다() -> None:
+    assert ni.impact_pct(15000, 197623, None) is None
+
+
 def test_컷을_두지_않는다() -> None:
     """'파급도 N% 이상이면 후보'를 지금 정하면 고정 % 를 세 번째로 틀리는 것이다.
 
@@ -223,3 +291,73 @@ def test_컷을_두지_않는다() -> None:
     """
     src = (Path(ni.__file__)).read_text(encoding="utf-8")
     assert "MIN_IMPACT" not in src and "IMPACT_THRESHOLD" not in src
+
+
+# ── 7. 자회사 사전 저장 왕복 ────────────────────────────
+
+
+def test_자회사_사전은_최신_사업연도만_쓴다(tmp_path) -> None:
+    """지분율은 시점 값이다. 연도를 섞으면 같은 회사가 두 값을 갖는다."""
+    from data import store
+
+    with store.connect(tmp_path / "t.db") as conn:
+        store.init_db(conn)
+        store.upsert_affiliates(
+            conn,
+            [
+                {
+                    "corp_code": "C1",
+                    "inv_prm": "에스케이온(주)",
+                    "quota_rt": 88.0,
+                    "bsns_year": "2024",
+                },
+                {
+                    "corp_code": "C1",
+                    "inv_prm": "에스케이온(주)",
+                    "quota_rt": 90.3,
+                    "bsns_year": "2025",
+                },
+            ],
+            code="096770",
+        )
+        aff = store.affiliates_of(conn, "096770")
+
+    assert aff == {"에스케이온(주)": 90.3}
+
+
+def test_지분율_결측은_None_으로_남는다(tmp_path) -> None:
+    """0 으로 떨어뜨리면 '재료가 모회사와 무관하다' 는 뜻이 되어버린다."""
+    from data import store
+
+    with store.connect(tmp_path / "t.db") as conn:
+        store.init_db(conn)
+        store.upsert_affiliates(
+            conn,
+            [
+                {
+                    "corp_code": "C1",
+                    "inv_prm": "이름만있는법인",
+                    "quota_rt": None,
+                    "bsns_year": "2025",
+                }
+            ],
+            code="096770",
+        )
+        assert store.affiliates_of(conn, "096770") == {"이름만있는법인": None}
+
+
+def test_사전이_없으면_빈_dict_다(tmp_path) -> None:
+    from data import store
+
+    with store.connect(tmp_path / "t.db") as conn:
+        store.init_db(conn)
+        assert store.affiliates_of(conn, "096770") == {}
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"), [("90.3", 90.3), ("1,000", 1000.0), ("-", None), ("", None), (None, None)]
+)
+def test_지분율_파싱은_0_으로_떨어지지_않는다(raw, want) -> None:
+    from data.sources import dart
+
+    assert dart._pct(raw) == want
