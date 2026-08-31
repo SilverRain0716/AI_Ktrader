@@ -31,6 +31,9 @@ class Verdict:
     mode: str
     blockers: tuple[str, ...] = ()
     orders: tuple[dict, ...] = field(default=())
+    # 막지는 않지만 사람이 알아야 하는 것. **차단과 섞지 않는다** —
+    # 섞으면 못 막을 것을 막거나 막아야 할 것을 흘린다.
+    notes: tuple[str, ...] = ()
 
     @property
     def sends_orders(self) -> bool:
@@ -47,16 +50,36 @@ def _already(conn: sqlite3.Connection, decision_id: str) -> set[str]:
     }
 
 
-def evaluate(conn: sqlite3.Connection, decision_id: str, *, now: datetime | None = None) -> Verdict:
-    """한 결정에 대한 집행 판정. **아무것도 쓰지 않는다.**"""
+def evaluate(
+    conn: sqlite3.Connection,
+    decision_id: str,
+    *,
+    now: datetime | None = None,
+    deposit_krw: int | None = None,
+) -> Verdict:
+    """한 결정에 대한 집행 판정. **아무것도 쓰지 않는다.**
+
+    `deposit_krw` 는 증권사 계좌 예수금이다. `mock`/`live` 에서는 **반드시 있어야 한다** —
+    시드가 잔고를 넘으면 주문이 거부되거나 미수가 남는다. 네트워크 호출을 이 함수 안에
+    두지 않으려고 인자로 받는다 — **테스트가 실제 계좌를 치면 안 된다.**
+    """
     now = now or datetime.now(dcfg.KST)
     m = gcfg.mode()
     blockers: list[str] = []
+    notes: list[str] = []
 
     kill = gcfg.kill_switch()
     if kill.on:
         blockers.append(f"킬 스위치: {kill.reason}")
     blockers += gcfg.check_coherent()
+
+    if m in (gcfg.MOCK, gcfg.LIVE):
+        from decision import config as ccfg
+        from gate import account as gacct
+
+        bad, note = gacct.check_seed(ccfg.account_seed()["total_equity_krw"], deposit_krw)
+        blockers += bad
+        notes += note
 
     row = conn.execute(
         "SELECT run_kind, status, valid_until, payload FROM decisions "
@@ -64,7 +87,9 @@ def evaluate(conn: sqlite3.Connection, decision_id: str, *, now: datetime | None
         (decision_id,),
     ).fetchone()
     if row is None:
-        return Verdict(decision_id, False, m, (*blockers, f"결정 {decision_id} 이 없다"))
+        return Verdict(
+            decision_id, False, m, (*blockers, f"결정 {decision_id} 이 없다"), notes=tuple(notes)
+        )
 
     run_kind, status, valid_until, payload = row
     if run_kind != "live":
@@ -94,7 +119,7 @@ def evaluate(conn: sqlite3.Connection, decision_id: str, *, now: datetime | None
                 }
             )
 
-    return Verdict(decision_id, not blockers, m, tuple(blockers), tuple(orders))
+    return Verdict(decision_id, not blockers, m, tuple(blockers), tuple(orders), tuple(notes))
 
 
 def record(conn: sqlite3.Connection, v: Verdict, *, now: datetime | None = None) -> int:
