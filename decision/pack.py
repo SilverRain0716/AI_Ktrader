@@ -278,6 +278,10 @@ def _data_quality(
         "missing_briefings": missing,
         "universe_coverage": coverage,
         "disclosures_since": disc_since,
+        # **null 이면 우량주 필터가 돌지 않았다** (ADR 0013 원칙 1). 러너가 채운다 —
+        # 유니버스를 만든 쪽이 어느 스냅샷을 썼는지 아는 유일한 자리이기 때문이다.
+        "margin_as_of": None,
+        "margin_max_pct": None,
         "warnings": warnings,
     }
 
@@ -482,6 +486,10 @@ def build(
 
     briefings = _briefings_block(conn, now, cycle)
     dq = _data_quality(conn, as_of, briefings, cycle, ohlcv_as_of, coverage)
+    # 유니버스가 실제로 쓴 스냅샷을 그대로 싣는다. 필터가 안 돌았으면 null 이 남고
+    # 그 사실은 uni.warnings 를 통해 경고에도 들어간다 — 조용히 통과하지 않는다.
+    dq["margin_as_of"] = uni.margin_as_of
+    dq["margin_max_pct"] = config.MARGIN_MAX_PCT if uni.margin_as_of else None
     dq["warnings"].extend(uni.warnings)
 
     limit = constraints.get("daily_loss_limit_krw") or 0
