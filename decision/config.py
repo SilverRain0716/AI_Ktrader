@@ -134,6 +134,12 @@ _LIMIT_SPECS: dict[str, tuple[type, float, float, str]] = {
     "AIK_DAILY_LOSS_LIMIT_KRW": (int, 0, 10_000_000_000, "일일 손실 한도 (원)"),
     "AIK_MAX_ORDER_VS_ADV_PCT": (float, 0.1, 50.0, "주문금액 / 20일 평균거래대금 (%)"),
     "AIK_PAPER_EQUITY_KRW": (int, 1_000_000, 100_000_000_000, "페이퍼 계좌 시드 (원)"),
+    # 갭 가드 (ADR 0009). **고정 % 가 아니라 ATR 배수다** — ATR 4% 종목과 13% 종목에
+    # 같은 잣대를 대면 안 된다. 실례: 삼화콘덴서 갭 -2.81% 는 ATR 9.9% 의 0.28배지만
+    # 같은 -2.81% 가 ATR 4% 종목에서는 0.70배로 성격이 전혀 다르다.
+    # 기본값을 두지 않는 이유는 다른 한도와 같다 — 아무도 설정하지 않은 채 도는 것을 막는다.
+    "AIK_MAX_ENTRY_GAP_UP_ATR": (float, 0.05, 5.0, "진입 허용 상방 갭 (ATR 배수)"),
+    "AIK_MAX_ENTRY_GAP_DOWN_ATR": (float, 0.05, 5.0, "진입 허용 하방 갭 (ATR 배수)"),
 }
 
 
@@ -208,6 +214,11 @@ def constraints() -> dict:
         "max_risk_pct_per_trade": _require("AIK_MAX_RISK_PCT_PER_TRADE"),
         "daily_loss_limit_krw": _require("AIK_DAILY_LOSS_LIMIT_KRW"),
         "max_order_vs_adv_pct": _require("AIK_MAX_ORDER_VS_ADV_PCT"),
+        # 봉투(ADR 0009) — AI 가 고르는 값이 아니라 실행 계층이 강제한다.
+        # 그럼에도 팩에 싣는 이유는 ADR 0003 원칙 1 이다: 팩에 없는 것은 AI 에게 없다.
+        # 집행되지 않을 진입을 계속 내는 것이 낭비이므로 알려 준다.
+        "max_entry_gap_up_atr": _require("AIK_MAX_ENTRY_GAP_UP_ATR"),
+        "max_entry_gap_down_atr": _require("AIK_MAX_ENTRY_GAP_DOWN_ATR"),
     }
     _check_coherent(c)
     return c

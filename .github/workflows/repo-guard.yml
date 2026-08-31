@@ -41,7 +41,7 @@ jobs:
           fi
 
           # (2) 실계좌 설정이 커밋되면 즉시 차단
-          if grep -rniE "EXECUTION_MODE\s*=\s*live|KIWOOM_ENV\s*=\s*real" \
+          if grep -rniE "EXECUTION_MODE\s*=\s*live|KIWOOM_ENV\s*=\s*real|KIWOOM_ORDER_BASE\s*=\s*https://api\.|AIK_LIVE_ACK\s*=\s*I_UNDERSTAND" \
                --include="*.py" --include="*.toml" --include="*.yml" --include="*.yaml" \
                --exclude=".env.example" . 2>/dev/null | grep -v "repo-guard.yml"; then
             echo "::error::실계좌 설정이 커밋되어 있는데 저장소가 public이다."
