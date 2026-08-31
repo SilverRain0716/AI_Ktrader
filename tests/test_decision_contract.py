@@ -301,3 +301,26 @@ def test_내용이_다른_덮어쓰기는_거부한다(tmp_path) -> None:
             "SELECT payload FROM context_packs WHERE pack_id=?", ("20260830-0929-premarket",)
         ).fetchone()
         assert len(json.loads(row[0])["universe"]) == 3
+
+
+# ── 5. 실험 라벨 (프롬프트 A/B · 변동성 측정) ───────────
+
+
+def test_실험_라벨이_없으면_멱등키가_그대로다():
+    """주문 멱등키를 건드리면 안 된다 — 같은 팩·arm 에 집행 대상이 둘이면 중복 주문이다."""
+    assert contract.decision_id("20260901-0018-premarket", 1) == "20260901-0018-premarket-a1"
+
+
+def test_실험_라벨이_붙으면_다른_키가_된다():
+    """이것이 없어서 같은 팩을 두 프롬프트로 비교할 수 없었다 — UNIQUE 제약에 막혔다."""
+    a = contract.decision_id("P1", 1)
+    b = contract.decision_id("P1", 1, "v3run1")
+    c = contract.decision_id("P1", 1, "v3run2")
+    assert len({a, b, c}) == 3
+
+
+@pytest.mark.parametrize("bad", ["has-hyphen", "", "a" * 33, "공백 있음", "slash/x"])
+def test_잘못된_실험_라벨을_거부한다(bad):
+    """하이픈을 막는 이유는 id 를 되짚을 때 팩 id 와 경계가 흐려지기 때문이다."""
+    with pytest.raises(ValueError):
+        contract.decision_id("P1", 1, bad)

@@ -40,7 +40,15 @@ SCHEMA_PATH = ROOT / "schemas" / "decision.schema.json"
 # 결정 행에 남겨 층을 가른다.
 RENDER_VERSION = "r1"
 
-PROMPT_ID = "decision_v1"
+# **v2 에서 매매 원칙(ADR 0013)을 실었다.** v1 은 규율(한도·근거 형식·무효화)만 말하고
+# "무엇을 근거로 사고 파는가"를 한 줄도 담지 않았다 — 실측(2026-09-01): 프롬프트에
+# '파급'·'거래대금'·'재료'·'원칙' 이 각 0회였고, 엔진은 거래대금이 식은 종목을 골랐다.
+# **프롬프트 id 는 결정 행에 봉인된다.** F2 는 v1 구간과 v2 구간을 끊어서 재야 한다 —
+# 이어 붙이면 "AI 선택"과 "프롬프트 변경"이 섞여 둘 다 해석 불가가 된다.
+# v3: 매수 시점의 **재료 소멸** 판정을 넣었다. v2 는 원칙을 실었지만 재료 소멸을
+# 청산 조건으로만 다뤘고, 그래서 엔진이 MSCI 리밸런싱 D-Day 로 몰린 일회성 수급을
+# 추세로 읽었다(LG이노텍, 거래 5.67배·외국인 7일 연속).
+PROMPT_ID = "decision_v3"
 API_PARAMS: dict[str, Any] = {
     "max_tokens": 16000,
     "output_config": {"effort": "high"},
@@ -275,6 +283,7 @@ def save_decision(conn: sqlite3.Connection, row: dict) -> None:
     """append-only. UPDATE 경로를 만들지 않는다 (ADR 0007 결정 3)."""
     cols = [
         "decision_id",
+        "run_kind",
         "attempt",
         "pack_id",
         "pack_sha256",
@@ -346,11 +355,16 @@ def decide(
     model: str | None = None,
     client=None,
     now: datetime | None = None,
+    run: str | None = None,
 ) -> dict:
     """한 arm 의 판단을 만들고 기록한다. **모든 시도가 남는다.**
 
     재시도는 같은 `decision_id` 를 재사용한다 — 그래야 "같은 id 의 주문은 두 번 나가지
     않는다"가 성립한다(ADR 0007 근거 4).
+
+    `run` 을 주면 **실험 결정**이다. 같은 팩을 여러 번 판단할 수 있고,
+    `run_kind='experiment'` 로 표시되어 **집행 대상에서 빠진다.**
+    프롬프트 A/B 와 모델 변동성 측정이 이것 없이는 UNIQUE 제약에 막혔다.
     """
     now = now or datetime.now(dcfg.KST)
     provider = provider or _provider(client=client)
@@ -362,7 +376,8 @@ def decide(
     validator = Draft202012Validator(schema)
 
     base = {
-        "decision_id": contract.decision_id(pack["pack_id"], arm),
+        "decision_id": contract.decision_id(pack["pack_id"], arm, run),
+        "run_kind": "experiment" if run else "live",
         "pack_id": pack["pack_id"],
         "pack_sha256": contract.canonical_sha256(pack),
         "arm": arm,
@@ -466,6 +481,7 @@ def decide_pair(
     provider=None,
     model: str | None = None,
     client=None,
+    run: str | None = None,
     **kw,
 ) -> dict:
     """Arm 1·2 를 같은 팩에 대해 짝으로 낸다.
@@ -486,7 +502,9 @@ def decide_pair(
     out: dict[str, Any] = {"paired": True, "provider": provider.name, "model": model}
     for arm in (1, 2):
         try:
-            out[f"arm{arm}"] = decide(conn, pack, arm, provider=provider, model=model, **kw)
+            out[f"arm{arm}"] = decide(
+                conn, pack, arm, provider=provider, model=model, run=run, **kw
+            )
         except DecisionRefused as e:
             log.error("arm %d 실패: %s", arm, e)
             out[f"arm{arm}"] = None

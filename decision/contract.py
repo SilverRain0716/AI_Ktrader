@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 # 모델이 만들지 않고 러너가 봉인하는 필드. 스키마(모델 출력)에 이 이름이 나타나면
@@ -67,12 +68,30 @@ def canonical_sha256(payload: Any) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def decision_id(pack_id: str, arm: int) -> str:
+# 실험 라벨에 허용하는 문자. id 를 파싱할 수 있어야 하므로 구분자(-)를 막는다.
+_RUN_LABEL = re.compile(r"^[A-Za-z0-9_.]{1,32}$")
+
+
+def decision_id(pack_id: str, arm: int, run: str | None = None) -> str:
     """`(pack_id, arm)` 당 하나. **결정론적이어야 재시도가 같은 키를 재사용한다.**
 
     난수를 쓰면 재시도마다 다른 멱등키가 나와 중복 주문 차단이 무의미해진다.
+
+    `run` 은 **실험 라벨**이다. 주면 접미사가 붙어 같은 팩을 여러 번 판단할 수 있다 —
+    프롬프트 A/B 와 모델 변동성 측정이 그것 없이는 불가능했다(UNIQUE 제약에 막힌다).
+    **`run` 이 붙은 결정은 집행 대상이 아니다**(`run_kind='experiment'`).
+
+    라벨에 `-` 를 막는 이유는 id 를 되짚을 때 팩 id 와 경계가 흐려지기 때문이다.
     """
-    return f"{pack_id}-a{arm}"
+    base = f"{pack_id}-a{arm}"
+    if run is None:
+        return base
+    if not _RUN_LABEL.match(run):
+        raise ValueError(
+            f"실험 라벨 {run!r} 은 영숫자·밑줄·점 1~32자여야 한다 (하이픈 불가) — "
+            "id 를 되짚을 때 팩 id 와 경계가 흐려진다"
+        )
+    return f"{base}-x{run}"
 
 
 def is_monitorable(invalidation: dict) -> bool:
