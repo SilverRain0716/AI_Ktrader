@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -211,6 +211,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     pack_id        TEXT NOT NULL,
     pack_sha256    TEXT NOT NULL,       -- 팩이 덮였는지 사후 검출용
     arm            INTEGER NOT NULL,    -- 0=정량 / 1=브리핑 포함 / 2=브리핑 제외
+    -- 'live' = 집행 대상 (pack_id·arm 당 하나). 'experiment' = 비교·측정용.
+    -- **실행 계층은 live 만 조회한다** — 섞이면 실험 결정이 주문으로 나간다.
+    run_kind       TEXT NOT NULL DEFAULT 'live',
     provider       TEXT,                -- anthropic|openai. 교체는 모델 교체와 같은 급의 함수 변경이다
     cycle          TEXT NOT NULL,
     generated_at   TEXT NOT NULL,
@@ -409,6 +412,19 @@ def _migrate_v13(conn):
     conn.execute("DROP TABLE margin_grades_old")
 
 
+def _migrate_v14(conn):
+    """`decisions.run_kind` 를 추가한다.
+
+    프롬프트 A/B 를 하려면 같은 팩을 여러 번 판단해야 하는데, `decision_id` 가
+    `(pack_id, arm)` 결정론이라 UNIQUE 제약에 막혔다. **멱등키는 그대로 둔다** —
+    같은 팩·arm 에 집행 대상이 둘이면 중복 주문 위험이 생긴다.
+
+    대신 실험 결정에 접미사를 붙이고 `run_kind='experiment'` 로 표시한다.
+    **실행 계층은 `run_kind='live'` 만 본다.**
+    """
+    _add_column_if_missing(conn, "decisions", "run_kind", "TEXT NOT NULL DEFAULT 'live'")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -422,6 +438,7 @@ _MIGRATIONS: dict[int, object] = {
     11: "",  # affiliates 추가 — _SCHEMA 재실행으로 충분 (ADR 0012)
     12: "",  # margin_grades 추가 — _SCHEMA 재실행으로 충분 (ADR 0013)
     13: _migrate_v13,  # margin_grades 를 스냅샷 이력으로 (PK 변경)
+    14: _migrate_v14,  # decisions.run_kind — 실험 결정을 집행 대상과 가른다
 }
 
 

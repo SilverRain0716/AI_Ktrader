@@ -123,11 +123,20 @@ def task_status(conn) -> int:
     return 0 if limits_ok else 3
 
 
-def task_decide(conn, pack_id: str | None, provider: str | None, model: str | None) -> int:
+def task_decide(
+    conn,
+    pack_id: str | None,
+    provider: str | None,
+    model: str | None,
+    experiment: str | None = None,
+) -> int:
     """Arm 1·2 를 같은 팩에 대해 짝으로 판단한다 (ADR 0005 3-arm).
 
     한쪽만 실패하면 성공한 쪽은 쓰되 **쌍에서 제외**된다 — 짝 없는 관측을 쌍으로 세면
     대응비교가 오염된다. 종료 코드 4 가 그 상태다.
+
+    `experiment` 라벨을 주면 **집행 대상이 아닌 실험 결정**이 된다. 같은 팩을 다시
+    판단할 수 있어 프롬프트 A/B 와 모델 변동성 측정이 가능해진다.
     """
     if pack_id:
         row = conn.execute(
@@ -143,11 +152,17 @@ def task_decide(conn, pack_id: str | None, provider: str | None, model: str | No
 
     p = json.loads(row[0])
     try:
-        out = engine.decide_pair(conn, p, provider=engine._provider(provider), model=model)
+        out = engine.decide_pair(
+            conn, p, provider=engine._provider(provider), model=model, run=experiment
+        )
     except engine.DecisionRefused as e:
         log.error("%s", e)
         return 3  # 설정 문제 (대개 ANTHROPIC_API_KEY)
 
+    if experiment:
+        log.info(
+            "**실험 실행** 라벨 %s — run_kind=experiment 로 기록되고 집행 대상이 아니다", experiment
+        )
     log.info("제공자 %s · 모델 %s", out["provider"], out["model"])
     for arm in (1, 2):
         r = out.get(f"arm{arm}")
@@ -234,6 +249,13 @@ def main(argv: list[str] | None = None) -> int:
         "--apply", action="store_true", help="watch: 깨진 조건에 invalidation_hit 을 찍는다"
     )
     p.add_argument(
+        "--experiment",
+        default=None,
+        metavar="LABEL",
+        help="decide: 실험 라벨(영숫자·밑줄·점 1~32자). 주면 같은 팩을 다시 판단할 수 있고 "
+        "run_kind=experiment 로 기록되어 집행 대상에서 빠진다",
+    )
+    p.add_argument(
         "--provider",
         choices=providers.available(),
         default=None,
@@ -256,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
                 conn, cycle=args.cycle, trigger=args.trigger, code=args.code, detail=args.detail
             )
         if args.task == "decide":
-            return task_decide(conn, args.pack_id, args.provider, args.model)
+            return task_decide(conn, args.pack_id, args.provider, args.model, args.experiment)
         if args.task == "watch":
             return task_watch(conn, apply=args.apply)
         if args.task == "show":

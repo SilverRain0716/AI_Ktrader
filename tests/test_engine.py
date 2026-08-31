@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from _fakes import FakeClient, _decision, _pack, _payload, _resp
@@ -362,3 +363,42 @@ def test_결정_만료는_접속매매_종료_시각이다(conn) -> None:
         conn, pack, 1, client=client, now=datetime(2026, 8, 31, 8, 20, tzinfo=dcfg.KST)
     )
     assert row["valid_until"].startswith("2026-08-31T15:20")
+
+
+# ── 실험 실행 (run_kind) ────────────────────────────────
+
+
+def test_실험_결정은_집행_대상이_아니다(conn):
+    """**가장 중요한 안전장치다.** 실험 결정이 live 로 섞이면 주문으로 나갈 수 있다."""
+    pack = _pack()
+    engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())), run="abtest1")
+    kinds = [r[0] for r in conn.execute("SELECT run_kind FROM decisions")]
+    assert kinds and set(kinds) == {"experiment"}
+    live = conn.execute("SELECT COUNT(*) FROM decisions WHERE run_kind='live'").fetchone()[0]
+    assert live == 0
+
+
+def test_실험_없이_부르면_live_다(conn):
+    engine.decide(conn, _pack(), 1, client=FakeClient(_resp(_payload())))
+    assert {r[0] for r in conn.execute("SELECT run_kind FROM decisions")} == {"live"}
+
+
+def test_같은_팩을_실험_라벨로_여러_번_판단할_수_있다(conn):
+    """이것이 안 되면 프롬프트 A/B 와 모델 변동성 측정이 불가능하다.
+
+    실제로 막혔다 — decision_id 가 (pack_id, arm) 결정론이라
+    같은 팩 재판단이 `UNIQUE constraint failed` 로 죽었다(2026-09-01).
+    """
+    pack = _pack()
+    engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())), run="run1")
+    engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())), run="run2")
+    ids = {r[0] for r in conn.execute("SELECT decision_id FROM decisions")}
+    assert len(ids) == 2
+
+
+def test_live_는_같은_팩을_두_번_판단하지_못한다(conn):
+    """멱등성은 그대로여야 한다. 실험 경로를 만들었다고 이것이 풀리면 안 된다."""
+    pack = _pack()
+    engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())))
+    with pytest.raises(sqlite3.IntegrityError):
+        engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())))

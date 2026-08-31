@@ -283,6 +283,7 @@ def save_decision(conn: sqlite3.Connection, row: dict) -> None:
     """append-only. UPDATE 경로를 만들지 않는다 (ADR 0007 결정 3)."""
     cols = [
         "decision_id",
+        "run_kind",
         "attempt",
         "pack_id",
         "pack_sha256",
@@ -354,11 +355,16 @@ def decide(
     model: str | None = None,
     client=None,
     now: datetime | None = None,
+    run: str | None = None,
 ) -> dict:
     """한 arm 의 판단을 만들고 기록한다. **모든 시도가 남는다.**
 
     재시도는 같은 `decision_id` 를 재사용한다 — 그래야 "같은 id 의 주문은 두 번 나가지
     않는다"가 성립한다(ADR 0007 근거 4).
+
+    `run` 을 주면 **실험 결정**이다. 같은 팩을 여러 번 판단할 수 있고,
+    `run_kind='experiment'` 로 표시되어 **집행 대상에서 빠진다.**
+    프롬프트 A/B 와 모델 변동성 측정이 이것 없이는 UNIQUE 제약에 막혔다.
     """
     now = now or datetime.now(dcfg.KST)
     provider = provider or _provider(client=client)
@@ -370,7 +376,8 @@ def decide(
     validator = Draft202012Validator(schema)
 
     base = {
-        "decision_id": contract.decision_id(pack["pack_id"], arm),
+        "decision_id": contract.decision_id(pack["pack_id"], arm, run),
+        "run_kind": "experiment" if run else "live",
         "pack_id": pack["pack_id"],
         "pack_sha256": contract.canonical_sha256(pack),
         "arm": arm,
@@ -474,6 +481,7 @@ def decide_pair(
     provider=None,
     model: str | None = None,
     client=None,
+    run: str | None = None,
     **kw,
 ) -> dict:
     """Arm 1·2 를 같은 팩에 대해 짝으로 낸다.
@@ -494,7 +502,9 @@ def decide_pair(
     out: dict[str, Any] = {"paired": True, "provider": provider.name, "model": model}
     for arm in (1, 2):
         try:
-            out[f"arm{arm}"] = decide(conn, pack, arm, provider=provider, model=model, **kw)
+            out[f"arm{arm}"] = decide(
+                conn, pack, arm, provider=provider, model=model, run=run, **kw
+            )
         except DecisionRefused as e:
             log.error("arm %d 실패: %s", arm, e)
             out[f"arm{arm}"] = None
