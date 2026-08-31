@@ -23,7 +23,7 @@ dependencies = [
 
 [tool.setuptools]
 # 최상위에 docs·schemas·scripts 가 함께 있어 자동 탐색이 실패한다. 실제 패키지만 명시한다.
-packages = ["briefing", "data", "data.sources", "decision"]
+packages = ["briefing", "data", "data.sources", "decision", "gate"]
 
 [project.optional-dependencies]
 dev = [

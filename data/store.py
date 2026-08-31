@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -285,6 +285,31 @@ CREATE TABLE IF NOT EXISTS margin_grades (
 );
 CREATE INDEX IF NOT EXISTS idx_margin_asof ON margin_grades(as_of, margin_pct);
 
+-- ── 주문 의도 대장 (집행 게이트) ────────────────────────
+-- **주문이 나가기 전에 여기 먼저 남는다.** 어댑터가 응답을 못 줘도(타임아웃·연결 끊김)
+-- 의도는 남아 있어야 재시도가 중복 주문이 되지 않는다.
+--
+-- `decision_id` 가 UNIQUE 다 — 같은 결정으로 두 번 주문하지 않는다는 뜻이다.
+-- 멱등키는 모델이 아니라 러너가 만든다(ADR 0007).
+CREATE TABLE IF NOT EXISTS order_intents (
+    intent_id    TEXT PRIMARY KEY,      -- decision_id + 종목. 결정 하나가 여러 종목을 낸다
+    decision_id  TEXT NOT NULL,
+    code         TEXT NOT NULL,
+    action       TEXT NOT NULL,         -- BUY|ADD|TRIM|EXIT
+    qty          INTEGER,
+    limit_price  INTEGER,               -- NULL 이면 시장가
+    mode         TEXT NOT NULL,         -- paper|mock|live. 어느 모드에서 만들어졌는가
+    kiwoom_env   TEXT NOT NULL,         -- real|mock. 어느 서버를 향했는가
+    created_at   TEXT NOT NULL,
+    -- 집행 결과. 게이트는 여기까지 채우지 않는다 — 어댑터가 생기면 채운다.
+    status       TEXT NOT NULL,         -- blocked|allowed|sent|filled|rejected|failed
+    reason       TEXT,                  -- 차단·실패 사유
+    broker_ref   TEXT                   -- 증권사 주문번호
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_dec_code
+    ON order_intents(decision_id, code);
+CREATE INDEX IF NOT EXISTS idx_intent_time ON order_intents(created_at);
+
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -439,6 +464,7 @@ _MIGRATIONS: dict[int, object] = {
     12: "",  # margin_grades 추가 — _SCHEMA 재실행으로 충분 (ADR 0013)
     13: _migrate_v13,  # margin_grades 를 스냅샷 이력으로 (PK 변경)
     14: _migrate_v14,  # decisions.run_kind — 실험 결정을 집행 대상과 가른다
+    15: "",  # order_intents 추가 — _SCHEMA 재실행으로 충분 (집행 게이트)
 }
 
 

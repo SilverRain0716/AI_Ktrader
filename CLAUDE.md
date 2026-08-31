@@ -160,7 +160,10 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 
 **있어 보이지만 배선되지 않은 것들이 있다.** 손대기 전에 확인한다.
 
-- `KILL_SWITCH` · `EXECUTION_MODE` — `.env.example` 에만 있고 **읽는 코드가 없다**
+- ~~`KILL_SWITCH` · `EXECUTION_MODE`~~ **(2026-09-01 배선)** — `gate/` 패키지가 읽는다.
+  **킬 스위치는 파일로도 켜진다**(`<데이터>/KILL`) — 환경변수는 프로세스 시작 시 고정돼
+  돌고 있는 배치를 못 멈춘다. **해석할 수 없는 값은 '켜짐'으로 본다.**
+  `python -m gate.pipeline status|check`. **게이트는 주문을 내지 않는다** — 판정만 한다
 - `recent_decisions` 팩 블록 — `decisions` 테이블은 생겼지만 팩에 채우는 배선은 아직 없다
 - ~~`invalidation_hit`~~ **(2026-08-31 배선)** — `decision/invalidation.py` + `python -m decision.pipeline watch [--apply]`. **감시기는 표시만 하고 청산하지 않는다** — 실행 계층이 0줄이라 킬 스위치 없는 자리에서 상태를 바꾸지 않는다. `stance_reversal` 과 뉴스 기반 재료 소멸은 **여전히 감시되지 않는다**
 - `account.is_mock` — `decision/config.py` 에서 **상수 `True`**. `KIWOOM_ENV` 와 무관하며 **팩에 실려 AI 가 읽는다**
@@ -177,4 +180,9 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 > 실행 계층에서 **주문만 제외한 것**을 먼저 만들고, 3개월 돌린 뒤, **주문 어댑터만 교체**한다.
 
 자세한 재배치안은 [`docs/03-current-state.md`](docs/03-current-state.md) 4장에 있다.
-**킬 스위치와 멱등성은 주문 코드보다 먼저 배선한다.**
+**킬 스위치와 멱등성은 주문 코드보다 먼저 배선한다.** — 2026-09-01 에 `gate/` 로 그렇게 했다.
+`execution/` 이 아니라 별도 패키지인 이유는 둘이다: public 인 동안 `repo-guard` 가 막고,
+**게이트는 주문 어댑터와 독립이어야** 어댑터가 모의→실전으로 바뀌어도 그대로 쓸 수 있다.
+
+**게이트가 잡은 실제 모순**: `.env` 가 `EXECUTION_MODE=paper` 인데 `KIWOOM_ENV=real` 이었다.
+조회만 하던 동안은 무해했지만 모의투자를 켜는 순간 **실전 서버로 주문이 나간다.**
