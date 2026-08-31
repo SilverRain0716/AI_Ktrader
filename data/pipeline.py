@@ -393,6 +393,49 @@ def task_status(conn) -> None:
 # ── 진입점 ──────────────────────────────────────────────
 
 
+def task_margin(conn, *, limit: int | None = None) -> None:
+    """증거금 등급을 API 로 받는다 (ADR 0013 원칙 1).
+
+    **API 가 정본이고 CSV 는 폴백이다.** 정확도는 같지만(10종목 대조 전부 일치)
+    **신선도가 다르다** — 등급이 바뀌면 API 는 즉시 반영하고 CSV 는 사람이 다시
+    내려받아야 안다. 낡은 등급으로 우량주를 판정하면 조용히 틀린다.
+
+    실패해도 배치를 멈추지 않는다. 다만 **일부만 받고 전체인 척하지 않는다** —
+    받은 것만 그날 스냅샷으로 남고, 못 받은 종목은 `eligible()` 에서 빠진다
+    (등급 미상은 통과시키지 않는다).
+    """
+    from datetime import date as _date
+
+    from data.sources import margin
+
+    day = conn.execute("SELECT MAX(date) FROM ohlcv WHERE volume>0").fetchone()[0]
+    if not day:
+        log.warning("일봉이 없어 증거금 조회를 건너뛴다")
+        return
+    rows = conn.execute(
+        "SELECT code, close FROM ohlcv WHERE date=? AND volume>0 AND LENGTH(code)=6 "
+        "ORDER BY close*volume DESC" + (f" LIMIT {int(limit)}" if limit else ""),
+        (day,),
+    ).fetchall()
+    try:
+        got, failed = margin.fetch_api([(c, int(p)) for c, p in rows])
+    except Exception as e:
+        log.error("증거금 조회 실패 — %s: %s", type(e).__name__, e)
+        log.error(
+            '  CSV 폴백: python -c "from data.sources import margin; ..." 또는 이전 스냅샷이 쓰인다'
+        )
+        return
+    if not got:
+        log.error("증거금을 한 건도 받지 못했다 — 우량주 필터가 이전 스냅샷으로 돈다")
+        return
+    margin.save(conn, got, as_of=_date.today())
+    conn.commit()
+    log.info("증거금 완료 — %d/%d종목 (실패 %d)", len(got), len(rows), len(failed))
+    if failed:
+        for code, why in list(failed.items())[:3]:
+            log.warning("  %s: %s", code, why[:70])
+
+
 def task_briefings(conn, *, days: int = 5) -> None:
     """GitLab 브리핑을 동기화한다.
 
@@ -429,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
             "disclosures",
             "indicators",
             "briefings",
+            "margin",
             "daily",
             "status",
         ],
@@ -465,12 +509,15 @@ def main(argv: list[str] | None = None) -> int:
             task_status(conn)
         elif args.task == "briefings":
             task_briefings(conn, days=args.days)
+        elif args.task == "margin":
+            task_margin(conn, limit=args.limit)
         elif args.task == "daily":
             task_listing(conn)
             task_ohlcv(conn, limit=args.limit, full=args.full)
             task_flows(conn, limit=args.limit, pages=args.pages)
             task_disclosures(conn, days=args.days)
             task_briefings(conn, days=args.days)
+            task_margin(conn, limit=args.limit)
             task_indicators(conn, limit=args.limit)
             task_status(conn)
 
