@@ -1,18 +1,26 @@
 """증거금 등급 — 사람이 내려받은 CSV 를 적재한다.
 
-## 왜 파일인가
+## API 가 정본이고 CSV 는 폴백이다
 
-**증거금률은 거래소 값이 아니라 증권사가 종목별로 정하는 값**이라 시세 API 에 없다.
-실제로 찾아봤고 전부 막혔다(2026-08-31).
+처음에 "증거금률은 API 에 없다"고 판정하고 HTS 내려받기 CSV 를 정본으로 삼았다.
+**틀렸다** — 시세 TR 이 아니라 **계좌 TR `kt00011`**(증거금률별 주문가능수량)이
+`stk_profa_rt` 로 종목 증거금률을 준다(2026-09-01 발견).
 
 | 시도 | 결과 |
 |---|---|
-| 키움 `ka10001` (45개 필드) | 없음. `crd_rt` 는 **신용비율**이지 증거금률이 아니다 |
+| 키움 `ka10001` (시세, 45개 필드) | 없음. `crd_rt` 는 **신용비율**이지 증거금률이 아니다 |
 | 네이버 종목 메인·시세·종목분석 | `증거금` 문자열 **0회** |
 | 키움 증거금률 안내 페이지 | HTTP 200 이나 `증거금` **0회** |
+| **키움 `kt00011` (계좌)** | **`stk_profa_rt` = '30%'** ← 여기 있었다 |
 
-그래서 HTS 에서 내려받은 CSV 를 정본으로 삼는다. **자동 갱신이 안 되므로 `as_of` 를
-반드시 남긴다** — 등급은 수시로 바뀌고, 낡은 등급으로 우량주를 판정하면 조용히 틀린다.
+대조 실측(2026-09-01): CSV · 모의 API · 실전 API 가 **10종목 전부 일치**했다.
+662종목 조회에 **약 14분**(실전 기준).
+
+**API 를 정본으로 쓰는 이유는 정확도가 아니라 신선도다.** 등급이 바뀌면 API 는 즉시
+반영하지만 CSV 는 사람이 다시 내려받아야 안다 — 낡은 등급으로 우량주를 판정하면
+조용히 틀린다. CSV 경로는 **API 가 막혔을 때의 폴백**으로 남긴다.
+
+`as_of` 는 어느 쪽으로 받았든 반드시 남긴다.
 
 ## 시총으로 대신하면 안 된다
 
@@ -106,6 +114,71 @@ def parse_grade(
         "정지" in raw,
         bool(re.search(r"주의|경고|경예|위험", raw)),
     )
+
+
+# ── API 경로 (정본) ─────────────────────────────────────
+
+MARGIN_TR = "kt00011"  # 증거금률별 주문가능수량요청 — stk_profa_rt 가 종목 증거금률이다
+MARGIN_PATH = "/api/dostk/acnt"
+_PCT = re.compile(r"(\d{1,3})\s*%?")
+
+
+def parse_rate(raw: object) -> int | None:
+    """`'30%'` → `30`. **모르는 형식이면 None 이지 0 이 아니다.**
+
+    0 으로 접으면 "증거금 0%" 라는 가장 우량한 등급으로 통과한다 — 정확히 반대다.
+    """
+    m = _PCT.fullmatch(str(raw or "").strip())
+    if not m:
+        return None
+    v = int(m.group(1))
+    return v if v in VALID_RATES else None
+
+
+def fetch_api(
+    codes: list[tuple[str, int]], *, client=None
+) -> tuple[list[MarginRow], dict[str, str]]:
+    """`(종목코드, 기준가)` 목록의 증거금률을 계좌 TR 로 받는다.
+
+    기준가는 주문가능수량 계산에 쓰이는 값이라 아무 값이나 줘도 등급은 같지만,
+    현실적인 값을 주는 편이 응답이 안정적이다.
+
+    **실패한 종목을 사유와 함께 돌려준다** — 일부만 받고 전체인 척하면 유니버스에
+    구멍이 뚫린 채로 필터가 돈다.
+    """
+    from data.sources.kiwoom import KiwoomClient
+
+    c = client or KiwoomClient()
+    ok: list[MarginRow] = []
+    failed: dict[str, str] = {}
+    for code, price in codes:
+        try:
+            j = c.post(MARGIN_TR, MARGIN_PATH, {"stk_cd": code, "uv": str(int(price or 0))})
+        except Exception as e:
+            failed[code] = f"{type(e).__name__}: {e}"
+            continue
+        pct = parse_rate(j.get("stk_profa_rt"))
+        if pct is None:
+            failed[code] = (
+                f"증거금률을 읽을 수 없다: {j.get('stk_profa_rt')!r} ({j.get('return_msg')})"
+            )
+            continue
+        ok.append(
+            MarginRow(
+                code=code,
+                margin_pct=pct,
+                name=None,
+                grade_raw=f"증{pct} (api {MARGIN_TR})",
+                credit=None,
+                collateral=None,
+                short_sell=None,
+                # API 는 정지·경보를 주지 않는다. **모르는 것을 '아니오'로 채우지 않으려면
+                # 그 판정은 다른 소스(listing.is_managed·거래정지 봉)가 맡아야 한다.**
+                halted=False,
+                caution=False,
+            )
+        )
+    return ok, failed
 
 
 def load_dir(directory: str | Path) -> list[MarginRow]:

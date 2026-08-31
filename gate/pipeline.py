@@ -53,10 +53,12 @@ def task_check(conn, decision_id: str | None, latest: bool, do_record: bool) -> 
         log.error("--decision 또는 --latest 가 필요하다")
         return 2
 
-    v = gcheck.evaluate(conn, decision_id)
+    v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed())
     log.info("결정 %s · 모드 %s", v.decision_id, v.mode)
     for o in v.orders:
         log.info("  주문 후보 %s %s (비중 %s%%)", o["action"], o["code"], o["weight_pct"])
+    for n in v.notes:
+        log.info("  알림: %s", n)
     if v.blockers:
         for b in v.blockers:
             log.warning("  차단: %s", b)
@@ -70,6 +72,24 @@ def task_check(conn, decision_id: str | None, latest: bool, do_record: bool) -> 
         conn.commit()
         log.info("대장에 %d건 기록 — **주문은 내지 않았다**", n)
     return 0 if v.allowed else 4
+
+
+def _deposit_if_needed() -> int | None:
+    """`mock`/`live` 에서만 계좌를 조회한다. **paper 는 계좌를 건드리지 않는다.**
+
+    실패해도 예외를 밖으로 내지 않는다 — `None` 이 곧 "확인 못 했다"이고,
+    게이트가 그것을 차단 사유로 쓴다(잔고 부족과 확인 실패를 섞지 않기 위해서다).
+    """
+    if gcfg.mode() not in (gcfg.MOCK, gcfg.LIVE):
+        return None
+    from data.sources.kiwoom import KiwoomClient
+    from gate import account as gacct
+
+    try:
+        return gacct.deposit_krw(KiwoomClient(base=gcfg.order_base()))
+    except Exception as e:
+        log.error("예수금 조회 실패 — %s: %s", type(e).__name__, e)
+        return None
 
 
 def _latest_live(conn) -> str | None:
@@ -92,7 +112,9 @@ def task_place(conn, decision_id: str | None, latest: bool) -> int:
         log.error("--decision 또는 --latest 가 필요하다")
         return 2
 
-    v = gcheck.evaluate(conn, decision_id)
+    v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed())
+    for n in v.notes:
+        log.info("알림: %s", n)
     if not v.allowed:
         for b in v.blockers:
             log.error("차단: %s", b)

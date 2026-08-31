@@ -177,6 +177,35 @@ class KiwoomClient:
                 time.sleep(wait)
             self._last_call = time.monotonic()
 
+    # ── 범용 호출 ───────────────────────────────────────
+
+    def post(self, tr: str, path: str, body: dict) -> dict:
+        """TR 하나를 부른다. **유량·재시도·페이싱을 `spot()` 과 똑같이 태운다.**
+
+        따로 만들면 한쪽만 페이싱을 타서 모의 서버에서 429 가 난다 —
+        실제로 그 실수를 한 적이 있다(동시성만 낮추고 간격을 안 둬서 20종목 중 1건 429).
+        """
+        for attempt in range(RETRY_ON_429 + 1):
+            self._pace()
+            r = self._client().post(
+                f"{self.base}{path}",
+                headers={
+                    "authorization": f"Bearer {self.token()}",
+                    "api-id": tr,
+                    "Content-Type": "application/json;charset=UTF-8",
+                },
+                json=body,
+            )
+            if r.status_code != 429:
+                break
+            if attempt == RETRY_ON_429:
+                raise KiwoomUnavailable(f"{tr}: 유량 한도 초과 ({attempt + 1}회 시도)")
+            time.sleep(RETRY_SLEEP_SEC)
+        j = r.json()
+        if j.get("return_code") not in (0, None):
+            raise KiwoomUnavailable(f"{tr}: {j.get('return_msg')}")
+        return j
+
     # ── 현재가 ──────────────────────────────────────────
 
     def spot(self, code: str) -> SpotQuote | None:

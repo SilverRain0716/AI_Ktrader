@@ -167,3 +167,110 @@ def test_상한을_넘으면_뺀다(db, tmp_path) -> None:
     margin.save(db, margin.load_dir(tmp_path), as_of="2026-08-31")
     assert margin.eligible(db, max_pct=40) == {}
     assert "000250" in margin.eligible(db, max_pct=50)
+
+
+# ── 5. API 경로 (정본) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [("30%", 30), ("100%", 100), ("30", 30), (" 40 %", 40), ("20%", 20)],
+)
+def test_증거금률_문자열을_읽는다(raw, want) -> None:
+    assert margin.parse_rate(raw) == want
+
+
+@pytest.mark.parametrize("raw", ["", None, "알수없음", "15%", "0%", "999%"])
+def test_모르는_형식은_None_이지_0_이_아니다(raw) -> None:
+    """0 으로 접으면 '증거금 0%' 라는 가장 우량한 등급으로 통과한다 — 정확히 반대다."""
+    assert margin.parse_rate(raw) is None
+
+
+class _FakeKiwoom:
+    """`kt00011` 응답만 흉내낸다."""
+
+    def __init__(self, table, boom=()):
+        self.table, self.boom, self.calls = table, set(boom), []
+
+    def post(self, tr, path, body):
+        code = body["stk_cd"]
+        self.calls.append((tr, code))
+        if code in self.boom:
+            raise RuntimeError("유량 한도 초과")
+        return {"return_code": 0, "stk_profa_rt": self.table.get(code)}
+
+
+def test_API_로_등급을_받는다() -> None:
+    """실측(2026-09-01): CSV·모의 API·실전 API 가 10종목 전부 일치했다."""
+    c = _FakeKiwoom({"000880": "30%", "000250": "100%"})
+    rows, failed = margin.fetch_api([("000880", 135500), ("000250", 200000)], client=c)
+    assert {r.code: r.margin_pct for r in rows} == {"000880": 30, "000250": 100}
+    assert not failed
+    assert c.calls[0][0] == margin.MARGIN_TR
+
+
+def test_읽을_수_없는_응답은_실패로_남는다() -> None:
+    """일부만 받고 전체인 척하면 유니버스에 구멍이 뚫린 채로 필터가 돈다."""
+    c = _FakeKiwoom({"000880": "30%", "999999": "알수없음"})
+    rows, failed = margin.fetch_api([("000880", 1), ("999999", 1)], client=c)
+    assert [r.code for r in rows] == ["000880"]
+    assert "999999" in failed
+
+
+def test_개별_실패가_전체를_멈추지_않는다() -> None:
+    c = _FakeKiwoom({"000880": "30%", "000250": "100%"}, boom={"000880"})
+    rows, failed = margin.fetch_api([("000880", 1), ("000250", 1)], client=c)
+    assert [r.code for r in rows] == ["000250"]
+    assert "유량" in failed["000880"]
+
+
+def test_API_는_정지_경보를_모른다고_말한다() -> None:
+    """`kt00011` 은 시장경보를 주지 않는다. **모르는 것을 '아니오'로 채우면 안 되므로**
+    그 판정은 다른 소스(listing.is_managed·거래정지 봉)가 맡는다.
+    """
+    rows, _ = margin.fetch_api([("000880", 1)], client=_FakeKiwoom({"000880": "30%"}))
+    assert rows[0].halted is False and rows[0].caution is False
+    assert "api" in rows[0].grade_raw
+
+
+def test_daily_배치가_증거금을_받는다() -> None:
+    """CSV 수동 적재만 두면 등급이 바뀌어도 아무 신호가 없다."""
+    import inspect
+
+    from data import pipeline as dp
+
+    src = inspect.getsource(dp.main)
+    daily = src[src.index('== "daily"') :]
+    daily = daily[: daily.index("task_status")]
+    assert "task_margin" in daily, "daily 배치에서 증거금 조회가 빠졌다"
+
+
+def test_지수_코드가_증거금_조회에_섞이지_않는다() -> None:
+    """**'KOSDAQ' 은 정확히 6자다** — 길이로는 안 걸러진다.
+
+    실제로 그 때문에 kt00011 이 "종목정보가 존재하지 않습니다"로 실패했다(2026-09-01).
+    """
+    import inspect
+
+    from data import pipeline as dp
+
+    src = inspect.getsource(dp.task_margin)
+    sql = "".join(line for line in src.splitlines() if not line.strip().startswith("#"))
+    assert "listing" in sql, "지수를 거르려면 상장 목록과 조인해야 한다"
+
+
+def test_숫자_6자리로_좁히면_실제_종목이_잘린다() -> None:
+    """숫자만 남기는 필터는 **보통주를 버린다.**
+
+    실측(2026-09-01): 삼성에피스홀딩스(0126Z0)·에임드바이오(0009K0)·
+    한화머시너리앤서비스홀딩스(0220W0)·삼양바이오팜(0120G0) 넷이 전부 보통주인데
+    코드에 문자가 있다. 그래서 GLOB 이 아니라 상장 목록 조인이 답이다.
+    """
+    import inspect
+    import re
+
+    from data import pipeline as dp
+
+    src = inspect.getsource(dp.task_margin)
+    sql = "".join(line for line in src.splitlines() if not line.strip().startswith("#"))
+    assert not re.search(r"GLOB\s*'\[0-9\]", sql), "숫자 6자리 필터는 실제 종목을 자른다"

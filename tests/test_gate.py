@@ -150,7 +150,8 @@ def test_실계좌는_명시적_승인이_필요하다(db, monkeypatch):
     assert any("AIK_LIVE_ACK" in b for b in gcheck.evaluate(db, _decision(db), now=NOW).blockers)
 
     monkeypatch.setenv("AIK_LIVE_ACK", "I_UNDERSTAND")
-    assert gcheck.evaluate(db, _decision(db, "D2"), now=NOW).allowed
+    # mock/live 는 예수금 확인이 필수다 — 없으면 시드가 잔고를 넘는지 알 수 없다.
+    assert gcheck.evaluate(db, _decision(db, "D2"), now=NOW, deposit_krw=10**12).allowed
 
 
 def test_모르는_모드는_paper_다(monkeypatch):
@@ -167,7 +168,7 @@ def test_paper_는_통과해도_주문이_나가지_않는다(db):
 
 def test_mock_은_주문이_나간다(db, monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "mock")
-    assert gcheck.evaluate(db, _decision(db), now=NOW).sends_orders
+    assert gcheck.evaluate(db, _decision(db), now=NOW, deposit_krw=10**12).sends_orders
 
 
 # ── 3. 결정 자격 ────────────────────────────────────────
@@ -261,3 +262,56 @@ def test_게이트에_주문_코드가_없다():
     src = "\n".join(p.read_text(encoding="utf-8") for p in (root / "gate").glob("*.py"))
     for banned in ("kt10000", "주문전송", "place_order", "send_order"):
         assert banned not in src, f"게이트에 주문 코드가 들어왔다: {banned}"
+
+
+# ── 6. 시드와 계좌 예수금 ───────────────────────────────
+
+
+def test_시드가_예수금보다_크면_막는다(db, monkeypatch):
+    """주문이 거부되거나 미수가 남는다."""
+    monkeypatch.setenv("EXECUTION_MODE", "mock")
+    monkeypatch.setenv("AIK_PAPER_EQUITY_KRW", "500000000")
+    v = gcheck.evaluate(db, _decision(db), now=NOW, deposit_krw=20_000_000)
+    assert not v.allowed and any("예수금" in b and "크다" in b for b in v.blockers)
+
+
+def test_예수금을_확인하지_못하면_막는다(db, monkeypatch):
+    """**확인 실패와 잔고 부족을 섞지 않는다.** 0 으로 접으면 둘이 같아진다."""
+    monkeypatch.setenv("EXECUTION_MODE", "mock")
+    v = gcheck.evaluate(db, _decision(db), now=NOW, deposit_krw=None)
+    assert not v.allowed and any("확인하지 못했다" in b for b in v.blockers)
+
+
+def test_시드가_예수금보다_작으면_막지_않고_알린다(db, monkeypatch):
+    """실측(2026-09-01): 모의계좌 예수금 5억 vs 페이퍼 시드 2천만.
+
+    주문은 시드 기준으로 나가므로 안전하다. 다만 **계좌 수익률로 성적을 읽으면 어긋난다** —
+    막을 일은 아니고 드러낼 일이다.
+    """
+    monkeypatch.setenv("EXECUTION_MODE", "mock")
+    monkeypatch.setenv("AIK_PAPER_EQUITY_KRW", "20000000")
+    v = gcheck.evaluate(db, _decision(db), now=NOW, deposit_krw=500_000_000)
+    assert v.allowed, "작은 시드는 막을 이유가 없다"
+    assert any("어긋난다" in n for n in v.notes)
+
+
+def test_paper_는_계좌를_보지_않는다(db, monkeypatch):
+    """계좌를 건드리지 않는 모드에서 예수금을 요구하면 돌지 않는다."""
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    assert gcheck.evaluate(db, _decision(db), now=NOW, deposit_krw=None).allowed
+
+
+def test_예수금_파싱은_0으로_접지_않는다():
+    """'entr' 을 못 읽었는데 0 을 돌려주면 모든 주문이 시드 초과로 막힌다."""
+    from gate import account as gacct
+
+    class Fake:
+        def __init__(self, v):
+            self.v = v
+
+        def post(self, *a, **k):
+            return {"return_code": 0, "entr": self.v}
+
+    assert gacct.deposit_krw(Fake("000000500000000")) == 500_000_000
+    assert gacct.deposit_krw(Fake("")) is None
+    assert gacct.deposit_krw(Fake("알수없음")) is None
