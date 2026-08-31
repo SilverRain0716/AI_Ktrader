@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -257,6 +257,31 @@ CREATE TABLE IF NOT EXISTS affiliates (
 );
 CREATE INDEX IF NOT EXISTS idx_affil_code ON affiliates(code);
 
+-- ── 증거금 등급 (ADR 0013 원칙 1) ───────────────────────
+-- **증권사가 종목별로 정하는 값이라 시세 API 에 없다.** 키움 ka10001 45개 필드에 없고
+-- (crd_rt 는 신용비율이지 증거금률이 아니다), 네이버 종목 3개 탭에 '증거금' 0회다.
+-- 사람이 HTS 에서 내려받은 CSV 를 적재한다.
+--
+-- **시총 프록시로 대신하면 안 된다.** 실측(182종목): 시총 3,000억 이상으로 거르면
+-- 정밀도 90.1% 다 — 10종목 중 1개가 증거금 50~100% 종목이고, 그것이 원칙 1 이
+-- 배제하려던 바로 그 종목이다. 삼천당제약은 시총 4조인데 증100% 다.
+-- **스냅샷 이력이다.** 등급은 과거를 받아올 수 없는 소멸 원천이라(뉴스와 같은 이유)
+-- 덮어쓰지 않고 as_of 별로 쌓는다. 현재 등급은 최신 as_of 를 읽는다.
+CREATE TABLE IF NOT EXISTS margin_grades (
+    code        TEXT NOT NULL,
+    margin_pct  INTEGER NOT NULL,      -- 위탁증거금률 20/30/40/50/60/100
+    name        TEXT,
+    grade_raw   TEXT NOT NULL,         -- 원문 구분. 파싱이 틀렸을 때 되짚을 근거
+    credit      TEXT,                  -- 신용 등급 A~E. 없으면 NULL (신용거래 불가)
+    collateral  TEXT,                  -- 담보 등급
+    short_sell  TEXT,                  -- 대주 등급
+    halted      INTEGER NOT NULL DEFAULT 0,  -- '정지'
+    caution     INTEGER NOT NULL DEFAULT 0,  -- '주의'·'경예' 등 시장경보
+    as_of       TEXT NOT NULL,         -- 내려받은 날. 등급은 수시로 바뀐다
+    PRIMARY KEY (code, as_of)
+);
+CREATE INDEX IF NOT EXISTS idx_margin_asof ON margin_grades(as_of, margin_pct);
+
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -360,6 +385,30 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "decisions", "provider", "TEXT")
 
 
+def _migrate_v13(conn):
+    """`margin_grades` 를 스냅샷 이력으로 바꾼다.
+
+    처음에 `code` 를 PK 로 두고 저장 때마다 전체를 지웠다. **틀렸다** — 증거금 등급은
+    과거를 받아올 수 없는 소멸 원천이고([ADR 0013](../docs/adr/0013-trading-doctrine.md)),
+    덮어쓰면 소급 검증이 영영 불가능해진다. 뉴스를 매일 쌓기로 한 것과 같은 이유다.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(margin_grades)")}
+    if not cols:
+        return
+    pk = [r[1] for r in conn.execute("PRAGMA table_info(margin_grades)") if r[5]]
+    if pk == ["code", "as_of"]:
+        return
+    conn.executescript("ALTER TABLE margin_grades RENAME TO margin_grades_old;")
+    conn.executescript(_SCHEMA)
+    conn.execute(
+        "INSERT OR REPLACE INTO margin_grades "
+        "(code,margin_pct,name,grade_raw,credit,collateral,short_sell,halted,caution,as_of) "
+        "SELECT code,margin_pct,name,grade_raw,credit,collateral,short_sell,halted,caution,as_of "
+        "FROM margin_grades_old"
+    )
+    conn.execute("DROP TABLE margin_grades_old")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -371,6 +420,8 @@ _MIGRATIONS: dict[int, object] = {
     9: "",  # decisions 테이블 추가 — _SCHEMA 재실행으로 충분
     10: _migrate_v10,  # decisions.provider 추가
     11: "",  # affiliates 추가 — _SCHEMA 재실행으로 충분 (ADR 0012)
+    12: "",  # margin_grades 추가 — _SCHEMA 재실행으로 충분 (ADR 0013)
+    13: _migrate_v13,  # margin_grades 를 스냅샷 이력으로 (PK 변경)
 }
 
 
