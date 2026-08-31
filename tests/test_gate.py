@@ -7,7 +7,7 @@
 2. **파일로도 켜진다.** 환경변수는 프로세스 시작 시 고정돼, 정작 멈추고 싶은
    순간에 돌고 있는 배치를 못 멈춘다.
 3. **모드와 서버가 어긋나면 막는다.** 실측(2026-09-01): `.env` 가
-   `EXECUTION_MODE=paper` 인데 `KIWOOM_ENV=real` 이었다 — 모의투자를 켜는 순간
+   `EXECUTION_MODE` 가 `paper` 인데 `KIWOOM_ENV` 는 `real` 이었다 — 모의투자를 켜는 순간
    실전 서버로 주문이 갈 상태였다.
 4. **실험 결정은 절대 집행하지 않는다.**
 """
@@ -105,7 +105,7 @@ def test_명시적으로_꺼진_값만_통과한다(monkeypatch, raw):
 
 
 def test_모의라면서_실전서버면_막는다(db, monkeypatch):
-    """실측: .env 가 EXECUTION_MODE=paper 이고 KIWOOM_ENV=real 이었다.
+    """실측: .env 의 EXECUTION_MODE 는 paper 인데 KIWOOM_ENV 는 real 이었다.
 
     조회만 하던 동안은 무해했지만, 모의투자를 켜는 순간 실계좌로 주문이 간다.
     """

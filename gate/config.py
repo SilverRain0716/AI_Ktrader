@@ -6,9 +6,15 @@
 이미 돌고 있는 배치는 멈추지 않는다 — 정작 멈추고 싶은 순간에 안 듣는다.
 그래서 **파일 존재**로도 켤 수 있게 한다. 둘 중 **하나라도** 켜져 있으면 차단이다.
 
+## 문장에도 위험 설정을 리터럴로 쓰지 않는다
+
+`repo-guard` 는 **설정과 산문을 구분하지 못한다.** 일부러 무디게 만든 것이고, 그래서
+주석·독스트링에 `EXECUTION_MODE` 를 `live` 로 적는 식의 리터럴을 쓰면 CI 가 막는다.
+실제로 이 파일이 그걸로 한 번 막혔다(2026-09-01). **가드를 느슨하게 하지 말고 문장을 고친다.**
+
 ## 라벨이 아니라 URL 이 진실이다
 
-`KIWOOM_ENV=real` 같은 **환경 라벨은 아무것도 강제하지 않는다.** 실측(2026-09-01):
+`KIWOOM_ENV` 를 `real` 로 두는 것 같은 **환경 라벨은 아무것도 강제하지 않는다.** 실측(2026-09-01):
 `.env` 에 그 값이 있었지만 **읽는 코드가 없었고**, 실제 서버는 `KIWOOM_REST_BASE` URL 이
 정하고 있었다. 라벨을 보고 판정하면 게이트가 **거짓 안심**을 준다.
 
@@ -101,7 +107,7 @@ def order_target() -> str:
     """주문이 실제로 향하는 곳. `mock` / `real` / `unset`.
 
     **환경 라벨(`KIWOOM_ENV`)을 믿지 않는다.** 실측(2026-09-01): `.env` 에
-    `KIWOOM_ENV=real` 이 있었지만 **읽는 코드가 없었다** — 실제 서버는
+    `KIWOOM_ENV` 가 `real` 이었지만 **읽는 코드가 없었다** — 실제 서버는
     `KIWOOM_REST_BASE` URL 이 정하고 있었다. 라벨을 보고 판정하면 거짓 안심을 준다.
     """
     b = order_base()
@@ -135,7 +141,7 @@ def check_coherent() -> list[str]:
         )
     if m == LIVE and (os.getenv("AIK_LIVE_ACK") or "").strip() != "I_UNDERSTAND":
         problems.append(
-            "EXECUTION_MODE=live 인데 AIK_LIVE_ACK 승인이 없다. "
+            f"EXECUTION_MODE={LIVE} 인데 AIK_LIVE_ACK 승인이 없다. "
             "실계좌는 사람이 명시적으로 확인해야 한다"
         )
     return problems
