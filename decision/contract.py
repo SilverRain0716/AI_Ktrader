@@ -47,8 +47,17 @@ _FORBIDDEN_BY_ACTION: dict[str, tuple[str, ...]] = {
     "EXIT": ("entry", "weight_pct"),
 }
 
+# 기계가 감시할 수 있는 조건. **수급 타입이 먼저다** — ADR 0013 원칙 2 가
+# "% 가 아니라 수급과 재료 소멸로 판단한다" 이기 때문이다.
 MONITORABLE_TYPES = frozenset(
-    {"price_below", "close_below_ma", "disclosure_category", "stance_reversal"}
+    {
+        "flow_reversal",  # 수급 이탈 — 원칙 2 의 본체
+        "volume_dryup",  # 관심 소멸
+        "disclosure_category",
+        "stance_reversal",
+        "price_below",
+        "close_below_ma",
+    }
 )
 
 
@@ -99,12 +108,21 @@ def action_requirements(decision: dict) -> list[str]:
 
     inv = decision.get("invalidation") or {}
     inv_type = inv.get("type")
-    if inv_type in ("price_below", "close_below_ma") and not isinstance(
-        inv.get("value"), (int, float)
-    ):
+    val = inv.get("value")
+    if inv_type in ("price_below", "close_below_ma") and not isinstance(val, (int, float)):
         problems.append(f"invalidation.type={inv_type} 인데 value 가 숫자가 아니다")
-    if inv_type == "disclosure_category" and not isinstance(inv.get("value"), str):
+    if inv_type == "disclosure_category" and not isinstance(val, str):
         problems.append("invalidation.type=disclosure_category 인데 value 가 문자열이 아니다")
+    # 수급 타입 (ADR 0013 원칙 2). 범위를 여기서 막지 않으면 value=0 인 flow_reversal 이
+    # "0일 연속 순매도"가 되어 진입 즉시 참이 된다 — 스키마는 형만 보고 값을 못 본다.
+    if inv_type == "flow_reversal" and not (isinstance(val, (int, float)) and val >= 1):
+        problems.append(
+            "invalidation.type=flow_reversal 인데 value 가 1 이상 정수가 아니다 (연속 순매도 일수)"
+        )
+    if inv_type == "volume_dryup" and not (isinstance(val, (int, float)) and 0 < val < 1):
+        problems.append(
+            "invalidation.type=volume_dryup 인데 value 가 0 초과 1 미만이 아니다 (거래대금 배수)"
+        )
 
     return problems
 

@@ -174,14 +174,65 @@ def task_decide(conn, pack_id: str | None, provider: str | None, model: str | No
     return 0
 
 
+def task_watch(conn, *, apply: bool) -> int:
+    """무효화 감시 (ADR 0013 원칙 2). **기본은 읽기만 한다** — `--apply` 여야 표시한다.
+
+    청산은 하지 않는다. 실행 계층이 0줄이므로 여기서 포지션을 닫으면 킬 스위치도
+    멱등성도 없는 자리에서 상태를 바꾸는 것이 된다.
+    """
+
+    from decision import invalidation as iv
+
+    day = conn.execute("SELECT MAX(date) FROM ohlcv WHERE volume > 0").fetchone()[0]
+    if not day:
+        log.error("일봉이 없다 — 먼저 데이터 배치를 돌린다")
+        return 1
+    verdicts = iv.scan(conn, day)
+    if not verdicts:
+        log.info("감시 대상 포지션이 없다 (열린 포지션 + invalidation 이 있는 것)")
+        return 0
+
+    counts = {s: 0 for s in (iv.HIT, iv.SAFE, iv.UNKNOWN)}
+    for v in verdicts:
+        counts[v.state] += 1
+        mark = {"hit": "깨짐", "safe": "유지", "unknown": "판정불가"}[v.state]
+        log.info("  [%s] %s — %s", mark, v.code, v.reason)
+    log.info(
+        "기준일 %s · 깨짐 %d · 유지 %d · 판정불가 %d",
+        day,
+        counts[iv.HIT],
+        counts[iv.SAFE],
+        counts[iv.UNKNOWN],
+    )
+    # 판정불가가 많으면 감시하는 척만 하는 것이다 — 조용히 넘기지 않는다.
+    if counts[iv.UNKNOWN] > counts[iv.HIT] + counts[iv.SAFE]:
+        log.warning(
+            "판정불가가 절반을 넘는다 — 조건이 감시되지 않고 있다. "
+            "invalidation.type 구성이나 데이터 적재를 확인하라"
+        )
+    if apply and counts[iv.HIT]:
+        n = iv.mark_hits(conn, verdicts)
+        conn.commit()
+        log.info(
+            "invalidation_hit 표시 %d건. **청산은 하지 않는다** — 재판단(event 사이클)이 다음이다",
+            n,
+        )
+    elif counts[iv.HIT]:
+        log.info("--apply 를 주면 %d건에 invalidation_hit 을 찍는다", counts[iv.HIT])
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="decision.pipeline", description="컨텍스트 팩 배치")
-    p.add_argument("task", choices=["build", "decide", "show", "status"])
+    p.add_argument("task", choices=["build", "decide", "show", "status", "watch"])
     p.add_argument("--cycle", choices=list(config.CYCLES), default="premarket")
     p.add_argument("--trigger", default=None, help="event 사이클의 트리거 종류")
     p.add_argument("--code", default=None)
     p.add_argument("--detail", default=None)
     p.add_argument("--pack-id", default=None)
+    p.add_argument(
+        "--apply", action="store_true", help="watch: 깨진 조건에 invalidation_hit 을 찍는다"
+    )
     p.add_argument(
         "--provider",
         choices=providers.available(),
@@ -206,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.task == "decide":
             return task_decide(conn, args.pack_id, args.provider, args.model)
+        if args.task == "watch":
+            return task_watch(conn, apply=args.apply)
         if args.task == "show":
             if not args.pack_id:
                 log.error("--pack-id 가 필요하다")
