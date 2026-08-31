@@ -159,6 +159,7 @@ python -m decision.pipeline status
 - [ADR 0007 — 판단 엔진](docs/adr/0007-judgment-engine.md) — AI 를 어떻게 부르고, 무엇을 남기는가
 - [ADR 0008 — 모델 동결](docs/adr/0008-model-freeze.md) — 왜 `claude-opus-5` 이고, **왜 2026-10-09 가 마감인가**
 - [ADR 0009 — 매매 시점](docs/adr/0009-entry-timing.md) — 봉투는 규율, 선택은 AI
+- [ADR 0010 — 뉴스·컨텍스트](docs/adr/0010-news-and-context.md) — 데이터가 AI 에게 도달하는가
 - [ADR](docs/adr/) — 왜 그렇게 결정했는가
 
 ---

@@ -40,7 +40,7 @@ def task_build(
             event["detail"] = detail
 
     try:
-        p = pack.build(conn, cycle=cycle, event_trigger=event)
+        p = pack.build(conn, cycle=cycle, event_trigger=event, with_news=True)
     except config.RiskLimitError as e:
         # RiskLimitError 는 PackRefused 의 하위다 — 아래보다 먼저 잡아야 구분이 된다.
         # 종료 코드를 나눈다: 3 = 설정 문제(사람이 .env 를 고쳐야 한다),

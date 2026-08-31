@@ -35,6 +35,9 @@ class Candidate:
     flows: dict = field(default_factory=dict)
     channels: list[str] = field(default_factory=list)
     screen_reasons: list[str] = field(default_factory=list)
+    # 컨텍스트 — 후보를 만들지 않고 이미 뽑힌 종목에 붙는다 (ADR 0010)
+    disclosures: list[dict] = field(default_factory=list)
+    news: list[dict] = field(default_factory=list)
 
     def to_pack_item(self) -> dict:
         return _compact(
@@ -48,6 +51,8 @@ class Candidate:
                 "tradable": True,  # 하드 필터를 통과했다는 뜻
                 "screen_reasons": self.screen_reasons,
                 "channels": self.channels,
+                "disclosures": self.disclosures,
+                "news": self.news,
             }
         )
 
@@ -226,6 +231,13 @@ def _momentum_channel(pool: dict[str, Candidate], quota: int) -> list[tuple[str,
     return [(code, reason) for _, code, reason in scored[:quota]]
 
 
+def _signed(v: float | None) -> str:
+    """순매수 금액을 부호와 함께. 0 이나 없음은 '—' 로 — 0 과 결측을 같게 보이지 않는다."""
+    if v is None:
+        return "—"
+    return f"{v:+,.0f}억"
+
+
 def _flow_channel(pool: dict[str, Candidate], quota: int) -> list[tuple[str, str]]:
     """서사보다 앞서는 자금 흐름. 연속 순매수 + 시총 대비 순매수 강도."""
     scored = []
@@ -246,7 +258,13 @@ def _flow_channel(pool: dict[str, Candidate], quota: int) -> list[tuple[str, str
             (
                 intensity,
                 c.code,
-                f"flow: 외{fd}일/기{idd}일 연속, 5일 순매수 시총대비 {intensity:.2f}%",
+                # **방향과 금액을 적는다.** "외3일/기3일" 만으로는 외국인이 팔고 기관이 사는
+                # 종목과 양쪽이 함께 사는 종목이 같은 문장으로 올라온다 — 실측에서
+                # 실리콘투(외 +2,078억 / 기 -1,814억)와 가온전선(외 +255억 / 기 +192억)이
+                # 구분되지 않았다 (ADR 0010).
+                f"flow: 외인 {fd}일 {_signed(f.get('foreign_net_5d_eok_krw'))} · "
+                f"기관 {idd}일 {_signed(f.get('inst_net_5d_eok_krw'))} "
+                f"(5일 합계 시총대비 {intensity:.2f}%)",
             )
         )
     scored.sort(key=lambda x: -x[0])
