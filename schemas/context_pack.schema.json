@@ -556,7 +556,9 @@
         "max_weight_pct_per_sector",
         "max_risk_pct_per_trade",
         "daily_loss_limit_krw",
-        "max_order_vs_adv_pct"
+        "max_order_vs_adv_pct",
+        "max_entry_gap_up_atr",
+        "max_entry_gap_down_atr"
       ],
       "additionalProperties": false,
       "properties": {
@@ -607,6 +609,18 @@
           "items": {
             "$ref": "#/$defs/stockCode"
           }
+        },
+        "max_entry_gap_up_atr": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 5.0,
+          "description": "진입 허용 상방 갭 (ATR 배수). **봉투다 — AI 가 고르는 값이 아니라 실행 계층이 강제한다** (ADR 0009). 시가가 전일 종가 대비 이 밴드를 벗어나면 진입 지시를 집행하지 않고 이벤트 재판단으로 돌린다. 팩에 싣는 이유는 ADR 0003 원칙 1 이다 — **팩에 없는 것은 AI 에게 없다.** 집행되지 않을 진입을 AI 가 계속 내면 그것이 낭비다.\\n\\n**고정 % 가 아니라 ATR 배수다.** ATR 4% 종목과 13% 종목에 같은 잣대를 대면 안 된다 — 삼화콘덴서 갭 −2.81% 는 ATR 9.9% 의 0.28배지만, 같은 −2.81% 가 ATR 4% 종목에서는 0.70배다."
+        },
+        "max_entry_gap_down_atr": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 5.0,
+          "description": "진입 허용 하방 갭 (ATR 배수). 위와 같은 규칙이며 아래쪽 밴드다."
         }
       }
     },
