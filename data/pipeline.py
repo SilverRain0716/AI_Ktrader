@@ -393,11 +393,45 @@ def task_status(conn) -> None:
 # ── 진입점 ──────────────────────────────────────────────
 
 
+def task_briefings(conn, *, days: int = 5) -> None:
+    """GitLab 브리핑을 동기화한다.
+
+    **`daily` 에 이것이 없어서 브리핑이 사흘 낡았다**(2026-09-01 발견). 일봉·수급·공시·지표는
+    돌았지만 브리핑 동기화는 별도 명령이라 아무도 안 돌렸고, 그 사이 팩의 briefing 채널이
+    비어 유니버스가 2채널로만 구성됐다. **브리핑이 없으면 F3(브리핑 기여도) 자체가
+    측정 불가**다 — Arm 1 과 Arm 2 의 입력이 같아진다.
+
+    `briefing` 패키지가 `data` 를 임포트하므로 여기서는 **지연 임포트**한다.
+    모듈 최상단에 두면 순환이 된다.
+
+    실패해도 배치 전체를 멈추지 않는다 — 브리핑은 외부 저장소이고, 일봉이 들어오는 것이
+    더 중요하다. 대신 **조용히 넘어가지 않는다.**
+    """
+    from briefing import pipeline as bp
+
+    try:
+        bp.task_sync(conn, days=days, full=False)
+    except Exception as e:
+        log.error("브리핑 동기화 실패 — %s: %s", type(e).__name__, e)
+        log.error(
+            "  팩의 briefing 채널이 비고 F3 를 잴 수 없다. 수동 확인: python -m briefing.pipeline sync"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="data.pipeline", description="일일 데이터 배치")
     p.add_argument(
         "task",
-        choices=["listing", "ohlcv", "flows", "disclosures", "indicators", "daily", "status"],
+        choices=[
+            "listing",
+            "ohlcv",
+            "flows",
+            "disclosures",
+            "indicators",
+            "briefings",
+            "daily",
+            "status",
+        ],
     )
     p.add_argument(
         "--limit",
@@ -429,11 +463,14 @@ def main(argv: list[str] | None = None) -> int:
             task_indicators(conn, limit=args.limit)
         elif args.task == "status":
             task_status(conn)
+        elif args.task == "briefings":
+            task_briefings(conn, days=args.days)
         elif args.task == "daily":
             task_listing(conn)
             task_ohlcv(conn, limit=args.limit, full=args.full)
             task_flows(conn, limit=args.limit, pages=args.pages)
             task_disclosures(conn, days=args.days)
+            task_briefings(conn, days=args.days)
             task_indicators(conn, limit=args.limit)
             task_status(conn)
 
