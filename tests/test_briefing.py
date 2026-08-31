@@ -492,3 +492,43 @@ def test_근거가_여전히_부족하면_실제_개수로_다시_쓴다():
     )
     pipeline.task_reparse(conn)
     assert _경고(conn) == ["알테오젠: 근거 1개 (브리핑 규칙은 2개 이상)"]
+
+
+# ── 일일 배치 배선 ──────────────────────────────────────
+
+
+def test_daily_배치가_브리핑을_동기화한다() -> None:
+    """**이것이 빠져 있어서 브리핑이 사흘 낡았다**(2026-09-01 발견).
+
+    일봉·수급·공시·지표는 돌았지만 브리핑 동기화는 별도 명령이라 아무도 안 돌렸다.
+    그 사이 팩의 briefing 채널이 비어 유니버스가 2채널로만 구성됐고,
+    **Arm 1·2 의 입력이 같아져 F3 를 잴 수 없었다.**
+    """
+    import inspect
+
+    from data import pipeline as dp
+
+    src = inspect.getsource(dp.main)
+    daily = src[src.index('== "daily"') :]
+    daily = daily[: daily.index("task_status")]
+    assert "task_briefings" in daily, "daily 배치에서 브리핑 동기화가 빠졌다"
+
+
+def test_브리핑_동기화_실패가_배치를_멈추지_않는다(tmp_path, monkeypatch, caplog) -> None:
+    """브리핑은 외부 저장소다. 못 받아도 일봉이 들어오는 것이 더 중요하다.
+
+    다만 **조용히 넘어가면 안 된다** — 낡은 브리핑으로 도는 것을 아무도 모르게 된다.
+    """
+    import logging
+
+    from briefing import pipeline as bp
+    from data import pipeline as dp
+
+    def boom(*a, **k):
+        raise RuntimeError("gitlab 접속 불가")
+
+    monkeypatch.setattr(bp, "task_sync", boom)
+    with caplog.at_level(logging.ERROR):
+        dp.task_briefings(None, days=3)  # 예외가 밖으로 나오면 안 된다
+    assert any("브리핑 동기화 실패" in r.message for r in caplog.records)
+    assert any("F3" in r.message for r in caplog.records), "무엇을 잃는지 말하지 않았다"
