@@ -202,6 +202,22 @@ def _request(params: dict) -> dict:
     raise DartError(f"DART 요청이 {config.DART_MAX_RETRY}회 모두 실패") from last_exc
 
 
+def _request_at(url: str, params: dict) -> dict:
+    """엔드포인트를 지정하는 요청. `_request` 는 공시목록 URL 에 고정돼 있다."""
+    last_exc: Exception | None = None
+    for attempt in range(1, config.DART_MAX_RETRY + 1):
+        _throttle()
+        try:
+            r = httpx.get(url, params=params, timeout=config.DART_TIMEOUT_SEC)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_exc = e
+            log.warning("DART 요청 실패 (%d/%d): %s", attempt, config.DART_MAX_RETRY, e)
+            time.sleep(1.0 * attempt)
+    raise DartError(f"DART 요청이 {config.DART_MAX_RETRY}회 모두 실패") from last_exc
+
+
 def _check_status(payload: dict) -> bool:
     """정상이면 True, 데이터 없음이면 False, 그 외에는 예외.
 
@@ -312,3 +328,59 @@ def _empty() -> pd.DataFrame:
             "url",
         ]
     )
+
+
+# ── 타법인 출자현황 (ADR 0012) ──────────────────────────
+
+_AFFIL_URL = "https://opendart.fss.or.kr/api/otrCprInvstmntSttus.json"
+
+
+def fetch_affiliates(corp_code: str, bsns_year: str) -> list[dict]:
+    """이 법인이 출자한 타법인과 **기말 지분율**.
+
+    자회사 재료가 모회사 주가로 이어지는지 보려면 지분율이 필요하다. SK온 1.5조 수주는
+    SK이노베이션 지분 **90.3%** 이므로 통째로 세면 안 된다 (ADR 0012).
+
+    **사전을 뉴스에서 쌓지 않고 여기서 받는 이유**: 뉴스 깔때기가 통과시킨 제목만 쌓이면
+    계열사명은 영원히 안 쌓인다 — 순환 논리였다.
+
+    실측(2026-08-31, 거래대금 상위 20종목): 20/20 응답, 평균 62건, 662종목 약 43분.
+    지분율을 못 읽으면 **None 이다 — 0 이 아니다.** 못 읽은 것이 0% 가 되면 그 재료가
+    모회사와 무관하다는 뜻이 되어버린다.
+    """
+    payload = _request_at(
+        _AFFIL_URL,
+        {
+            "crtfc_key": _api_key(),
+            "corp_code": corp_code,
+            "bsns_year": bsns_year,
+            "reprt_code": "11011",  # 사업보고서
+        },
+    )
+    if not _check_status(payload):
+        return []
+    out = []
+    for item in payload.get("list") or []:
+        name = (item.get("inv_prm") or "").strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "corp_code": corp_code,
+                "inv_prm": name,
+                "quota_rt": _pct(item.get("trmend_blce_qota_rt")),
+                "bsns_year": bsns_year,
+            }
+        )
+    return out
+
+
+def _pct(raw) -> float | None:
+    """'90.3' → 90.3, '-'·''·None → None. **0 으로 떨어뜨리지 않는다.**"""
+    text = str(raw or "").replace(",", "").strip()
+    if not text or text == "-":
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None

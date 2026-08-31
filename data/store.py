@@ -12,7 +12,7 @@ import logging
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -238,6 +238,25 @@ CREATE INDEX IF NOT EXISTS idx_dec_pack ON decisions(pack_id, arm);
 CREATE INDEX IF NOT EXISTS idx_dec_time ON decisions(generated_at, arm);
 
 -- 배치 실행 기록. 어떤 날 무엇이 실패했는지 남지 않으면 결손을 발견할 수 없다.
+-- ── 타법인 출자현황 (ADR 0012) ──────────────────────────
+-- **자회사 사전을 뉴스 제목에서 쌓지 않고 DART 에서 받아온다.**
+-- 처음에 "쌓인 제목에서 빈도로 뽑는다"고 설계했는데 순환 논리였다 — 깔때기가
+-- 종목명 있는 제목만 통과시키면 계열사명은 영원히 쌓이지 않는다.
+--
+-- 이 표는 **깔때기에 쓰지 않는다.** AI 가 subject 를 뽑은 뒤 그 이름 하나를
+-- 해당 종목의 자회사(평균 62개) 안에서만 조회한다 — 4만 건으로 제목을 훑지 않으므로
+-- 오탐이 구조적으로 생기지 않는다.
+CREATE TABLE IF NOT EXISTS affiliates (
+    corp_code  TEXT NOT NULL,          -- 모회사 DART 고유번호
+    code       TEXT,                   -- 모회사 6자리 종목코드
+    inv_prm    TEXT NOT NULL,          -- 피출자 법인명 (DART 표기 그대로)
+    quota_rt   REAL,                   -- 기말 지분율 %. 못 읽으면 NULL — 0 이 아니다
+    bsns_year  TEXT NOT NULL,          -- 어느 사업연도 보고서인가 (지분율은 시점 값이다)
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (corp_code, inv_prm, bsns_year)
+);
+CREATE INDEX IF NOT EXISTS idx_affil_code ON affiliates(code);
+
 CREATE TABLE IF NOT EXISTS ingest_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
@@ -351,6 +370,7 @@ _MIGRATIONS: dict[int, object] = {
     8: _migrate_v8,  # is_managed_known 분리 (판정 못한 것을 정상으로 두지 않는다)
     9: "",  # decisions 테이블 추가 — _SCHEMA 재실행으로 충분
     10: _migrate_v10,  # decisions.provider 추가
+    11: "",  # affiliates 추가 — _SCHEMA 재실행으로 충분 (ADR 0012)
 }
 
 
@@ -842,3 +862,37 @@ def chunked(items: Iterable, size: int):
             buf = []
     if buf:
         yield buf
+
+
+def upsert_affiliates(conn: sqlite3.Connection, rows: list[dict], code: str | None = None) -> int:
+    """타법인 출자현황 적재 (ADR 0012). 같은 (모회사, 피출자, 연도) 는 덮어쓴다."""
+    if not rows:
+        return 0
+    now = datetime.now(tz=UTC).isoformat()
+    conn.executemany(
+        "INSERT OR REPLACE INTO affiliates "
+        "(corp_code, code, inv_prm, quota_rt, bsns_year, fetched_at) VALUES (?,?,?,?,?,?)",
+        [
+            (r["corp_code"], code, r["inv_prm"], r.get("quota_rt"), r["bsns_year"], now)
+            for r in rows
+        ],
+    )
+    return len(rows)
+
+
+def affiliates_of(conn: sqlite3.Connection, code: str) -> dict[str, float | None]:
+    """그 종목의 자회사 `{DART 표기: 지분율 %}`. 최신 사업연도만 쓴다.
+
+    **깔때기용이 아니다.** AI 가 뽑은 subject 하나를 여기서 조회할 뿐이다 —
+    4만 건으로 제목을 훑지 않으므로 오탐이 구조적으로 생기지 않는다.
+    """
+    row = conn.execute("SELECT MAX(bsns_year) FROM affiliates WHERE code = ?", (code,)).fetchone()
+    if not row or not row[0]:
+        return {}
+    return {
+        name: rt
+        for name, rt in conn.execute(
+            "SELECT inv_prm, quota_rt FROM affiliates WHERE code = ? AND bsns_year = ?",
+            (code, row[0]),
+        )
+    }

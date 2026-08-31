@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/SilverRain0716/AI_Ktrader/main/schemas/news_impact.schema.json",
+  "title": "뉴스 파급도 판정 (모델 출력)",
+  "description": "1단계 기계 깔때기를 통과한 제목에 대한 파급도 판정의 유일한 출력 형식 (ADR 0012). **이 스키마는 모델이 내는 것만 정의한다** — judgment_id·pack 연결·모델·제공자·타임스탬프는 러너가 봉인한다(ADR 0007 결정 3과 같은 규칙). 구조화 출력(output_config.format / text.format)에 그대로 넘길 수 있도록 모든 객체가 additionalProperties=false 이고 모든 속성이 required 다 — 선택 필드는 null 을 허용하는 방식으로 표현한다.\n\n**이 판정은 매수 판단이 아니다.** 판단 호출과 반드시 분리해서 부른다 — 같은 호출에 섞으면 파급도 판정이 종목 선택에 영향을 주고 F2 가 오염된다(ADR 0012).\n\n**모델은 산술을 하지 않는다.** 시총 대비 비율(= 파급도)은 러너가 scale_eok_krw / market_cap_eok_krw 로 계산한다. 모델에게 시총을 주지 않는 이유는 둘이다: 비율은 검산 가능한 산술이므로 코드가 맡고(engine.validate() 와 같은 원칙), 시총을 보여주면 '큰 회사니 큰 재료겠지' 하는 역방향 추론이 판정에 섞인다.\n\n**결과(주가 등락)를 입력에 넣지 않는다.** 소급 판정에서 그날의 등락을 함께 보여주면 라벨이 새어 실험 8 이 무의미해진다.",
+  "type": "object",
+  "required": [
+    "judgments",
+    "data_concerns"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "judgments": {
+      "type": "array",
+      "maxItems": 300,
+      "description": "입력으로 준 항목과 **정확히 같은 집합**이어야 한다. 러너가 item_id 집합을 대조해 하나라도 빠지거나 없던 것이 생기면 응답 전체를 거부하고 재요청한다 — 부분 파싱하지 않는다. 실측 기준 하루 약 235건이고, 러너는 100건 단위로 나눠 부른다.",
+      "items": {
+        "$ref": "#/$defs/judgment"
+      }
+    },
+    "data_concerns": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "입력 제목 자체의 문제. 예: '제목이 잘려 금액 단위를 알 수 없다'. 판정 근거가 아니라 수집 품질 신호다.",
+      "items": {
+        "type": "string",
+        "maxLength": 300
+      }
+    }
+  },
+  "$defs": {
+    "judgment": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "제목 한 건(같은 사건 군집이면 대표 한 건)에 대한 판정.",
+      "required": [
+        "item_id",
+        "code",
+        "attributed",
+        "subject",
+        "modality",
+        "sign",
+        "scale_raw",
+        "scale_eok_krw",
+        "scope",
+        "note"
+      ],
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{12}$",
+          "description": "러너가 (code, headline, at) 로 만든 결정론적 해시. **모델은 받은 값을 그대로 돌려준다.** 리플레이에서 같은 입력이 같은 id 를 갖게 하려고 순번이 아니라 해시를 쓴다."
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[0-9]{6}$",
+          "description": "이 제목이 걸린 종목 페이지의 코드. 입력을 그대로 돌려준다 — 재료의 주인이 아니라 **출처**다. 주인은 attributed·subject 가 말한다."
+        },
+        "attributed": {
+          "type": "boolean",
+          "description": "제목 속 재료가 **이 종목(code)의 것인가.** 실측에서 이것이 가장 흔한 오판이었다: 한미반도체 페이지의 'SK하닉 5조', SK이노베이션 페이지의 '삼성전자 8조 순매도'. 정규식은 이걸 못 가린다. 재료가 아예 없는 단순 시황·홍보 기사도 false 다."
+        },
+        "subject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 40,
+          "description": "재료의 주체를 **제목에 쓰인 표기 그대로.** 'SK온', 'SK하이닉스', '한화에어로스페이스'. 종목 코드로 바꾸지 않는다 — 계열사·브랜드를 모회사로 잇는 사전은 아직 없고(ADR 0012 결정 7), 이 필드가 그 사전을 쌓는 원자료다. 주체를 특정할 수 없으면 null."
+        },
+        "modality": {
+          "type": "string",
+          "enum": [
+            "confirmed",
+            "pending",
+            "target",
+            "outlook"
+          ],
+          "description": "재료의 확정 정도. confirmed=체결·승인·공시된 사실('9GWh 공급계약'). pending=아직 아님('1.9조 KF-21 수주전', MOU, 신청, 협상). target=회사가 내건 목표·계획('2030년 매출 1조원 정조준'). outlook=제3자 전망·증권사 추정('목표가 45만원 상향'). **'수주'와 '수주전'이 한 글자 차이**이고, 실측에서 정규식이 여기서 틀렸다."
+        },
+        "sign": {
+          "type": "string",
+          "enum": [
+            "positive",
+            "negative",
+            "neutral"
+          ],
+          "description": "이 종목 주가에 대한 방향. **크기가 크다고 호재가 아니다** — 삼성바이오로직스 3조 유상증자는 그날 −6% 였다. 판단하기 어려우면 neutral 이다. 추측해서 방향을 만들지 않는다."
+        },
+        "scale_raw": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 40,
+          "description": "규모 표현을 **제목에서 그대로 오려낸 문자열.** '1.5조', '4445억원', '9GWh'. **러너가 이 값이 제목의 부분문자열인지 검사하고, 아니면 응답 전체를 거부한다** — 없는 숫자를 만들어내는 것을 막는 장치다. 규모 표현이 없으면 null."
+        },
+        "scale_eok_krw": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "scale_raw 를 **억원**으로 환산한 값(접미사가 곧 단위다 — CLAUDE.md 금액 단위 규칙). 1.5조 → 15000. **통화 금액일 때만 채운다.** 'GWh'·'톤'·'만대' 같은 물량은 단가를 모르므로 null 로 두고 scale_raw 에만 남긴다 — 단가를 추정하면 그 순간 환각이다. 외화는 제목에 환율이 없으면 null 이다."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "stock",
+            "sector",
+            "market"
+          ],
+          "description": "재료가 미치는 범위. stock=개별 종목(SK온 수주). sector=업종 전반('정제마진 강세 전망'). market=시장 전체('연준 매파 발언'). **이것은 가격과 대조하는 용도이지 단독 근거가 아니다** — 섹터 동반 상승은 일봉에 이미 있고, 그쪽이 정본이다(ADR 0012 결정 5)."
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 120,
+          "description": "판정이 애매했던 이유. **감사용이고 순위에 쓰지 않는다.** 없으면 null. 확신도 점수를 두지 않은 이유가 여기 있다 — 검증되지 않은 숫자를 두면 그것이 임계로 쓰인다."
+        }
+      }
+    }
+  }
+}
