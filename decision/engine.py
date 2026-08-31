@@ -40,7 +40,12 @@ SCHEMA_PATH = ROOT / "schemas" / "decision.schema.json"
 # 결정 행에 남겨 층을 가른다.
 RENDER_VERSION = "r1"
 
-PROMPT_ID = "decision_v1"
+# **v2 에서 매매 원칙(ADR 0013)을 실었다.** v1 은 규율(한도·근거 형식·무효화)만 말하고
+# "무엇을 근거로 사고 파는가"를 한 줄도 담지 않았다 — 실측(2026-09-01): 프롬프트에
+# '파급'·'거래대금'·'재료'·'원칙' 이 각 0회였고, 엔진은 거래대금이 식은 종목을 골랐다.
+# **프롬프트 id 는 결정 행에 봉인된다.** F2 는 v1 구간과 v2 구간을 끊어서 재야 한다 —
+# 이어 붙이면 "AI 선택"과 "프롬프트 변경"이 섞여 둘 다 해석 불가가 된다.
+PROMPT_ID = "decision_v2"
 API_PARAMS: dict[str, Any] = {
     "max_tokens": 16000,
     "output_config": {"effort": "high"},
