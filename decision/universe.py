@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from datetime import time as dtime
 
 from data import config as dcfg
+from data.sources import margin
 from decision import config
 
 log = logging.getLogger(__name__)
@@ -101,15 +102,26 @@ class UniverseResult:
     candidates: list[Candidate]
     hard_filter_passed: int
     warnings: list[str] = field(default_factory=list)
+    # 어느 시점의 증거금 등급을 썼는가. **None 이면 필터가 돌지 않았다** (ADR 0013 원칙 1).
+    margin_as_of: str | None = None
 
 
 # ── 1단계: 하드 필터 ────────────────────────────────────
 
 
 def hard_filter(
-    conn: sqlite3.Connection, as_of: date, *, now: datetime | None = None
+    conn: sqlite3.Connection,
+    as_of: date,
+    *,
+    now: datetime | None = None,
+    warnings: list[str] | None = None,
 ) -> dict[str, Candidate]:
-    """거래 자체가 불가능하거나 슬리피지가 전략을 삼키는 종목을 잘라낸다."""
+    """거래 자체가 불가능하거나 슬리피지가 전략을 삼키는 종목을 잘라낸다.
+
+    **증거금 등급 필터(ADR 0013 원칙 1)가 여기 있다.** 스냅샷이 없으면 필터를 적용하지
+    않는데, 그 사실을 `warnings` 에 남긴다 — 조용히 전 종목이 통과하는 것이
+    이 저장소가 반복해 당한 실패 방식이다.
+    """
     halt_since = (as_of - timedelta(days=config.HALT_LOOKBACK_DAYS)).isoformat()
 
     rows = conn.execute(
@@ -153,8 +165,24 @@ def hard_filter(
         ),
     ).fetchall()
 
+    # 증거금 등급 — as_of 이하 최신 스냅샷만 본다. 오늘 등급을 과거에 대면
+    # "나중에 강등될 종목"을 미리 피하는 완벽한 미래 정보가 된다(거래정지 필터와 같은 이유).
+    margin_as_of = margin.latest_as_of(conn, on=as_of)
+    ok_margin: dict[str, int] | None = None
+    if margin_as_of:
+        ok_margin = margin.eligible(conn, max_pct=config.MARGIN_MAX_PCT, on=as_of)
+    elif warnings is not None:
+        warnings.append(
+            f"{as_of} 이하의 증거금 등급 스냅샷이 없어 우량주 필터를 적용하지 못했다 "
+            f"(ADR 0013 원칙 1). 증{config.MARGIN_MAX_PCT}% 초과 종목이 유니버스에 들어온다"
+        )
+
     out: dict[str, Candidate] = {}
     for code, name, market, sector, payload in rows:
+        # 등급을 모르는 종목은 통과시키지 않는다 — 표가 일부만 덮고 있을 때
+        # "모르면 통과"로 두면 검사 없이 들어온다.
+        if ok_margin is not None and code not in ok_margin:
+            continue
         try:
             p = json.loads(payload)
         except (TypeError, json.JSONDecodeError):
@@ -285,8 +313,8 @@ def build(
     """
     if now is None:
         now = datetime.combine(as_of, dtime(23, 59, 59), tzinfo=dcfg.KST)
-    pool = hard_filter(conn, as_of, now=now)
     warnings: list[str] = []
+    pool = hard_filter(conn, as_of, now=now, warnings=warnings)
     passed = len(pool)
 
     if exclude:
@@ -313,4 +341,9 @@ def build(
 
     # 상한 초과 시 채널 수가 많은 종목(여러 근거가 겹치는 종목)을 우선 남긴다
     cands = sorted(picks.values(), key=lambda c: (-len(c.channels), c.code))[: config.UNIVERSE_MAX]
-    return UniverseResult(candidates=cands, hard_filter_passed=passed, warnings=warnings)
+    return UniverseResult(
+        candidates=cands,
+        hard_filter_passed=passed,
+        warnings=warnings,
+        margin_as_of=margin.latest_as_of(conn, on=as_of),
+    )

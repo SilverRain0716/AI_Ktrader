@@ -700,6 +700,20 @@
             "null"
           ],
           "description": "뉴스 수집 시각 (ISO 8601). null 이면 수집하지 못했다 — 그 사실이 warnings 에도 남는다"
+        },
+        "margin_as_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "증거금 등급 스냅샷 날짜 (YYYY-MM-DD). **null 이면 그 시점 이하의 스냅샷이 없어 우량주 필터(ADR 0013 원칙 1)가 적용되지 않았다는 뜻이다** — 조용히 전 종목이 통과한 것이므로 warnings 에도 남는다. 등급은 증권사가 정하고 API 로 못 받아 사람이 내려받은 CSV 를 쓰므로, as_of 가 낡아 있을 수 있다."
+        },
+        "margin_max_pct": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "적용한 증거금률 상한(%). 이 값 이하 등급만 유니버스에 들어온다. margin_as_of 가 null 이면 이 값도 null 이다 — 필터가 돌지 않았다."
         }
       }
     }

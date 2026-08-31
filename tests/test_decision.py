@@ -266,6 +266,70 @@ def test_하드필터_유효봉_부족_제외(db):
     assert "900005" not in universe.hard_filter(db, AS_OF)
 
 
+# ── 증거금 등급 필터 (ADR 0013 원칙 1) ──────────────────
+
+
+def _seed_margin(conn, rows, as_of="2026-08-20"):
+    """(code, margin_pct) 목록을 스냅샷으로 심는다."""
+    conn.executemany(
+        "INSERT OR REPLACE INTO margin_grades "
+        "(code,margin_pct,name,grade_raw,halted,caution,as_of) VALUES (?,?,?,?,0,0,?)",
+        [(c, p, c, f"증{p}", as_of) for c, p in rows],
+    )
+
+
+def test_증거금_상한_초과_종목은_유니버스에서_빠진다(db):
+    """실측 근거: 삼천당제약은 시총 4조인데 증100% 다. 시총 하한으로는 못 거른다."""
+    _seed_margin(db, [("000660", 20), ("207940", 100)])
+    pool = universe.hard_filter(db, AS_OF)
+    assert "000660" in pool
+    assert "207940" not in pool, "증100% 종목이 통과했다"
+
+
+def test_등급을_모르는_종목은_통과하지_못한다(db):
+    """표가 일부만 덮고 있을 때 '모르면 통과'로 두면 검사 없이 들어온다.
+
+    실제로 처음 내려받은 표는 유니버스 662 중 183종목만 덮고 있었다.
+    """
+    _seed_margin(db, [("000660", 20)])
+    pool = universe.hard_filter(db, AS_OF)
+    assert "000660" in pool
+    assert "207940" not in pool, "등급 미상 종목이 통과했다"
+
+
+def test_스냅샷이_없으면_필터를_끄되_경고를_남긴다(db):
+    """조용히 전 종목이 통과하는 것이 이 저장소가 반복해 당한 실패 방식이다.
+
+    끄는 것 자체는 맞다 — 스냅샷 이전 날짜를 리플레이할 수 없으면 백테스트가 막힌다.
+    끄고 **말하지 않는 것**이 문제다.
+    """
+    warns: list[str] = []
+    pool = universe.hard_filter(db, AS_OF, warnings=warns)
+    assert "000660" in pool, "스냅샷이 없으면 필터는 돌지 않는다"
+    assert any("증거금" in w for w in warns), "필터가 꺼진 사실이 어디에도 안 남았다"
+
+
+def test_미래_등급이_새지_않는다(db):
+    """오늘 등급을 과거에 대면 '나중에 강등될 종목'을 미리 피하는 완벽한 미래 정보가 된다.
+
+    거래정지 필터가 상한을 두는 것과 같은 이유다(치명 C).
+    """
+    _seed_margin(db, [("000660", 20)], as_of="2026-08-01")
+    _seed_margin(db, [("000660", 100)], as_of="2026-08-25")  # AS_OF 이후
+    assert "000660" in universe.hard_filter(db, AS_OF), "미래 스냅샷이 샜다"
+
+
+def test_유니버스_결과가_쓴_스냅샷을_밝힌다(db):
+    _seed_margin(db, [("000660", 20), ("207940", 20), ("005380", 20)])
+    assert universe.build(db, AS_OF).margin_as_of == "2026-08-20"
+
+
+def test_스냅샷이_없으면_margin_as_of_가_None_이다(db):
+    r = universe.build(db, AS_OF)
+    assert r.margin_as_of is None
+    assert any("증거금" in w for w in r.warnings)
+
+
 def _seed_disclosure(conn, rcept_no, code, report_nm, day, category=None):
     """실제 적재 경로와 같은 판정을 태운다. 판정을 테스트가 손으로 쓰면
     분류가 틀려도 테스트는 통과한다 — 검증하려던 것이 빠져나간다."""
