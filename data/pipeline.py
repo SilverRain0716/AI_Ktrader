@@ -413,8 +413,16 @@ def task_margin(conn, *, limit: int | None = None) -> None:
         log.warning("일봉이 없어 증거금 조회를 건너뛴다")
         return
     rows = conn.execute(
-        "SELECT code, close FROM ohlcv WHERE date=? AND volume>0 AND LENGTH(code)=6 "
-        "ORDER BY close*volume DESC" + (f" LIMIT {int(limit)}" if limit else ""),
+        # **`LENGTH(code)=6` 으로 지수를 거를 수 없다** — 'KOSDAQ' 이 정확히 6자다
+        # (그 때문에 kt00011 이 "종목정보가 존재하지 않습니다"로 실패했다).
+        #
+        # 그렇다고 숫자 6자리로 좁히면 **실제 종목이 잘린다** — 삼성에피스홀딩스(0126Z0),
+        # 에임드바이오(0009K0) 처럼 **보통주인데 코드에 문자가 있는** 종목이 있다.
+        # 정답은 `listing` 조인이다: 지수는 상장 목록에 없고, 상장 종목은 전부 있다.
+        "SELECT o.code, o.close FROM ohlcv o "
+        "JOIN (SELECT code FROM listing GROUP BY code) l ON l.code = o.code "
+        "WHERE o.date=? AND o.volume>0 "
+        "ORDER BY o.close*o.volume DESC" + (f" LIMIT {int(limit)}" if limit else ""),
         (day,),
     ).fetchall()
     try:

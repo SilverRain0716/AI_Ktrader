@@ -243,3 +243,34 @@ def test_daily_배치가_증거금을_받는다() -> None:
     daily = src[src.index('== "daily"') :]
     daily = daily[: daily.index("task_status")]
     assert "task_margin" in daily, "daily 배치에서 증거금 조회가 빠졌다"
+
+
+def test_지수_코드가_증거금_조회에_섞이지_않는다() -> None:
+    """**'KOSDAQ' 은 정확히 6자다** — 길이로는 안 걸러진다.
+
+    실제로 그 때문에 kt00011 이 "종목정보가 존재하지 않습니다"로 실패했다(2026-09-01).
+    """
+    import inspect
+
+    from data import pipeline as dp
+
+    src = inspect.getsource(dp.task_margin)
+    sql = "".join(line for line in src.splitlines() if not line.strip().startswith("#"))
+    assert "listing" in sql, "지수를 거르려면 상장 목록과 조인해야 한다"
+
+
+def test_숫자_6자리로_좁히면_실제_종목이_잘린다() -> None:
+    """숫자만 남기는 필터는 **보통주를 버린다.**
+
+    실측(2026-09-01): 삼성에피스홀딩스(0126Z0)·에임드바이오(0009K0)·
+    한화머시너리앤서비스홀딩스(0220W0)·삼양바이오팜(0120G0) 넷이 전부 보통주인데
+    코드에 문자가 있다. 그래서 GLOB 이 아니라 상장 목록 조인이 답이다.
+    """
+    import inspect
+    import re
+
+    from data import pipeline as dp
+
+    src = inspect.getsource(dp.task_margin)
+    sql = "".join(line for line in src.splitlines() if not line.strip().startswith("#"))
+    assert not re.search(r"GLOB\s*'\[0-9\]", sql), "숫자 6자리 필터는 실제 종목을 자른다"
