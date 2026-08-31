@@ -393,6 +393,73 @@ def task_status(conn) -> None:
 # ── 진입점 ──────────────────────────────────────────────
 
 
+def task_ohlcv_integrated(conn, *, limit: int | None = None, base_dt: str | None = None) -> None:
+    """일봉을 **통합 거래소(KRX+NXT)** 기준으로 다시 채운다.
+
+    네이버 일봉은 KRX 만 담는다. 실측(2026-09-01, 24종목 표본):
+    **우리 DB / 통합 = 중앙 75% · 최소 35% · 최대 100%**, NXT 비중이 종목마다 **0~65%** 다.
+
+    단순 배율이 아니라 종목마다 다르므로 **거래대금 비교가 통째로 왜곡된다** —
+    사장님 원칙 5(거래대금 방향)와 급변 스캔(ADR 0011)의 배수·절대 순위가 전부 그 위에 있다.
+
+    축척은 확인했다: 키움 수정주가(`upd_stkpc_tp=1`)가 네이버와 같다.
+    가온전선이 원본가와는 224/267 불일치인데 수정주가와는 0/267 일치한다.
+
+    **지수(KOSPI·KOSDAQ)는 건드리지 않는다** — ka10081 이 지수를 1건만 준다.
+    거래정지일 행도 그대로 둔다(키움이 그 날짜를 주지 않으므로 네이버 행이 남는다).
+    """
+    from datetime import date as _date
+
+    from data.sources.kiwoom import KiwoomClient
+
+    base_dt = base_dt or _date.today().strftime("%Y%m%d")
+    codes = [
+        r[0]
+        for r in conn.execute(
+            "SELECT o.code FROM ohlcv o "
+            "JOIN (SELECT code FROM listing GROUP BY code) l ON l.code = o.code "
+            "GROUP BY o.code ORDER BY MAX(o.close * o.volume) DESC"
+            + (f" LIMIT {int(limit)}" if limit else "")
+        )
+    ]
+    if not codes:
+        log.warning("대상 종목이 없다 — 먼저 일봉을 적재한다")
+        return
+    since = conn.execute("SELECT MIN(date) FROM ohlcv").fetchone()[0]
+    client = KiwoomClient()
+    done = rows = 0
+    failed: dict[str, str] = {}
+    for code in codes:
+        try:
+            bars = client.daily_chart(code, base_dt=base_dt, venue="AL")
+        except Exception as e:
+            failed[code] = f"{type(e).__name__}: {e}"
+            continue
+        keep = [b for b in bars if b["date"] >= since]
+        conn.executemany(
+            "INSERT OR REPLACE INTO ohlcv "
+            "(code,date,open,high,low,close,volume,halted,source,adjusted) "
+            "VALUES (?,?,?,?,?,?,?,0,'kiwoom_al',1)",
+            [
+                (code, b["date"], b["open"], b["high"], b["low"], b["close"], b["volume"])
+                for b in keep
+            ],
+        )
+        done += 1
+        rows += len(keep)
+        if done % 100 == 0:
+            conn.commit()
+            log.info("  통합 일봉 %d/%d종목 · %d행", done, len(codes), rows)
+    conn.commit()
+    log.info("통합 일봉 완료 — %d/%d종목 · %d행 (실패 %d)", done, len(codes), rows, len(failed))
+    if failed:
+        for code, why in list(failed.items())[:3]:
+            log.warning("  %s: %s", code, why[:70])
+    log.warning(
+        "**지표를 다시 계산해야 한다** — 종가·거래량이 바뀌었다: python -m data.pipeline indicators"
+    )
+
+
 def task_margin(conn, *, limit: int | None = None) -> None:
     """증거금 등급을 API 로 받는다 (ADR 0013 원칙 1).
 
@@ -481,6 +548,7 @@ def main(argv: list[str] | None = None) -> int:
             "indicators",
             "briefings",
             "margin",
+            "ohlcv-integrated",
             "daily",
             "status",
         ],
@@ -519,6 +587,8 @@ def main(argv: list[str] | None = None) -> int:
             task_briefings(conn, days=args.days)
         elif args.task == "margin":
             task_margin(conn, limit=args.limit)
+        elif args.task == "ohlcv-integrated":
+            task_ohlcv_integrated(conn, limit=args.limit)
         elif args.task == "daily":
             task_listing(conn)
             task_ohlcv(conn, limit=args.limit, full=args.full)
