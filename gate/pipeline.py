@@ -22,7 +22,8 @@ def task_status() -> int:
     kill = gcfg.kill_switch()
     problems = gcfg.check_coherent()
     log.info("집행 모드   %s", gcfg.mode())
-    log.info("키움 서버   %s", gcfg.kiwoom_env())
+    log.info("조회 서버   %s", gcfg.read_base() or "(미설정)")
+    log.info("주문 서버   %s  → %s", gcfg.order_base() or "(미설정)", gcfg.order_target())
     log.info(
         "킬 스위치   %s%s",
         "켜짐" if kill.on else "꺼짐",

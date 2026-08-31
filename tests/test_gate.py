@@ -39,7 +39,8 @@ def _clean_env(monkeypatch, tmp_path):
     """게이트 환경을 테스트가 통제한다. 기본은 '가장 안전한 통과 상태'다."""
     monkeypatch.setenv("KILL_SWITCH", "false")
     monkeypatch.setenv("EXECUTION_MODE", "paper")
-    monkeypatch.setenv("KIWOOM_ENV", "mock")
+    monkeypatch.setenv("KIWOOM_ORDER_BASE", "https://mockapi.kiwoom.com")
+    monkeypatch.delenv("KIWOOM_ENV", raising=False)
     monkeypatch.delenv("AIK_LIVE_ACK", raising=False)
     monkeypatch.setattr(gcfg, "KILL_FILE", tmp_path / "KILL")
 
@@ -104,20 +105,48 @@ def test_명시적으로_꺼진_값만_통과한다(monkeypatch, raw):
 
 
 def test_모의라면서_실전서버면_막는다(db, monkeypatch):
-    """실측: .env 가 EXECUTION_MODE=paper · KIWOOM_ENV=real 이었다.
+    """실측: .env 가 EXECUTION_MODE=paper 이고 KIWOOM_ENV=real 이었다.
 
-    조회만 하던 동안은 무해했지만, 모의투자를 켜는 순간 실전 서버로 주문이 간다.
+    조회만 하던 동안은 무해했지만, 모의투자를 켜는 순간 실계좌로 주문이 간다.
     """
     monkeypatch.setenv("EXECUTION_MODE", "mock")
-    monkeypatch.setenv("KIWOOM_ENV", "real")
+    monkeypatch.setenv("KIWOOM_ORDER_BASE", "https://api.kiwoom.com")
     v = gcheck.evaluate(db, _decision(db), now=NOW)
     assert not v.allowed
-    assert any("실전 서버로 주문이 나간다" in b for b in v.blockers)
+    assert any("실계좌로 주문이 나간다" in b for b in v.blockers)
+
+
+def test_환경_라벨로는_속일_수_없다(db, monkeypatch):
+    """**KIWOOM_ENV 는 읽는 코드가 없는 라벨이었다**(2026-09-01 실측).
+
+    실제 서버는 URL 이 정한다. 라벨을 보고 판정하면 게이트가 거짓 안심을 준다.
+    """
+    monkeypatch.setenv("EXECUTION_MODE", "mock")
+    monkeypatch.setenv("KIWOOM_ENV", "mock")  # 라벨은 모의라고 말한다
+    monkeypatch.setenv("KIWOOM_ORDER_BASE", "https://api.kiwoom.com")  # 실제는 실전
+    assert not gcheck.evaluate(db, _decision(db), now=NOW).allowed
+
+
+def test_주문_엔드포인트가_없으면_막는다(db, monkeypatch):
+    """**조회용으로 조용히 대체하지 않는다** — 대체하는 순간 분리가 무의미해진다."""
+    monkeypatch.setenv("EXECUTION_MODE", "mock")
+    monkeypatch.delenv("KIWOOM_ORDER_BASE", raising=False)
+    monkeypatch.setenv("KIWOOM_REST_BASE", "https://api.kiwoom.com")
+    v = gcheck.evaluate(db, _decision(db), now=NOW)
+    assert not v.allowed and any("어디로 갈지 정해지지 않았다" in b for b in v.blockers)
+
+
+def test_모의_판정은_kiwoom_모듈과_같은_기준을_쓴다():
+    """두 곳이 다르게 판정하면 한쪽이 '모의'라고 믿는 동안 다른 쪽이 실전을 친다."""
+    from data.sources.kiwoom import MOCK_HOST_MARK
+
+    assert gcfg._is_mock_host(f"https://{MOCK_HOST_MARK}.kiwoom.com")
+    assert not gcfg._is_mock_host("https://api.kiwoom.com")
 
 
 def test_실계좌는_명시적_승인이_필요하다(db, monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "live")
-    monkeypatch.setenv("KIWOOM_ENV", "real")
+    monkeypatch.setenv("KIWOOM_ORDER_BASE", "https://api.kiwoom.com")
     assert any("AIK_LIVE_ACK" in b for b in gcheck.evaluate(db, _decision(db), now=NOW).blockers)
 
     monkeypatch.setenv("AIK_LIVE_ACK", "I_UNDERSTAND")

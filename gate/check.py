@@ -103,7 +103,7 @@ def record(conn: sqlite3.Connection, v: Verdict, *, now: datetime | None = None)
     차단됐어도 남긴다. *"왜 그날 주문이 안 나갔는가"* 를 나중에 물을 수 있어야 한다.
     """
     now = now or datetime.now(dcfg.KST)
-    env = gcfg.kiwoom_env()
+    env = gcfg.order_target()
     reason = "; ".join(v.blockers) or None
     rows = [
         (
