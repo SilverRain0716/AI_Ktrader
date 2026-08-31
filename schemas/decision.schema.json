@@ -270,11 +270,13 @@
               "enum": [
                 "price_below",
                 "close_below_ma",
+                "flow_reversal",
+                "volume_dryup",
                 "disclosure_category",
                 "stance_reversal",
                 "unstructured"
               ],
-              "description": "price_below=지정가 하회 / close_below_ma=종가가 이동평균선 하회 / disclosure_category=특정 유형 공시 발생 / stance_reversal=브리핑 관점 반전 / unstructured=위 넷으로 표현할 수 없다. **unstructured 는 감시되지 않는다** — 러너가 monitorable=false 로 기록하고, 그 비율이 높아지면 enum 을 재검토한다."
+              "description": "무엇이 깨지면 이 판단이 틀린 것인가.\n\n**수급 타입이 먼저다** — [ADR 0013](../docs/adr/0013-trading-doctrine.md) 원칙 2 가 *'익절·손절은 % 로 계산하지 않는다. 수급과 이슈, 재료의 소멸로 판단한다'* 이기 때문이다. 처음에 이 enum 은 다섯 값 중 둘이 가격 기준이고 수급 타입이 하나도 없었다 — 그대로 감시기를 만들면 원칙 2 가 아니라 가격 손절을 감시하게 된다.\n\n- `flow_reversal` = **수급 이탈.** value 는 연속 순매도 일수(정수). 진입 근거가 외국인·기관 매집이었다면 그 매집이 끊기는 것이 재료 소멸이다\n- `volume_dryup` = **관심 소멸.** value 는 20일 평균 거래대금 대비 배수(예 0.6). 이 배수 아래로 내려가면 재료가 식은 것이다\n- `disclosure_category` = 특정 유형 공시 발생. value 는 공시 유형 문자열\n- `stance_reversal` = 브리핑 관점 반전. value 는 null\n- `price_below` / `close_below_ma` = 가격 기준. **원칙 2 는 이것을 주 근거로 쓰지 말라고 한다** — `stop` 이 이미 재난 방지선을 맡고 있으므로 여기에 가격 조건을 또 두면 손절이 두 겹이 된다\n- `unstructured` = 위로 표현할 수 없다. **감시되지 않는다** — 러너가 monitorable=false 로 기록하고, 그 비율이 높아지면 enum 을 재검토한다"
             },
             "value": {
               "type": [
@@ -282,7 +284,7 @@
                 "string",
                 "null"
               ],
-              "description": "price_below=가격(원) / close_below_ma=이동평균 기간(20, 60) / disclosure_category=공시 유형 문자열 / stance_reversal·unstructured=null"
+              "description": "price_below=가격(원) / close_below_ma=이동평균 기간(20, 60) / **flow_reversal=연속 순매도 일수(정수, 1 이상)** / **volume_dryup=거래대금 배수(0 초과 1 미만)** / disclosure_category=공시 유형 문자열 / stance_reversal·unstructured=null"
             },
             "deadline": {
               "type": [

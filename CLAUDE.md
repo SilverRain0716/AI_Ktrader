@@ -133,7 +133,7 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
   채널 정의(momentum·flow·briefing)는 *구현된 것*이지 *의도된 것*이 아니었다 — 셋 다
   **이미 형성된 상태**만 보아서 SK이노베이션을 놓쳤다. 원칙과 채널이 어긋나면 원칙이 정본이다.
   **`stop` 은 없애지 않는다** — 포지션 크기가 손절폭에서 나온다. 주 청산은 `invalidation` 이고
-  `stop` 은 재난 방지선이다. 다만 **`invalidation` 감시기가 0줄이라 원칙 2 는 지금 작동하지 않는다**
+  `stop` 은 재난 방지선이다. **`stop` 도달 빈도가 곧 `invalidation` 설계의 품질 지표다**
 - `schemas/` 가 계층 간 계약이다. **지표를 추가할 때는 스키마를 먼저 고친다**
 - **판단 엔진을 만들기 전에 [ADR 0007](docs/adr/0007-judgment-engine.md) 을 읽는다.** 호출은 저장소 안 **도구 없는** API 호출이고(외부 세션은 팩 밖을 봐서 F3 를 오염시킨다), 결정 저장소는 판단 엔진과 **같은 회차**에 만들며, `decision_id` 는 모델이 아니라 **러너가 생성**한다. 선행 작업 둘은 **끝났다**(2026-08-30) — 스키마는 구조화 출력에 그대로 넘길 수 있고(`output_config.format`), `pack.save()` 는 내용이 달라지는 덮어쓰기를 `PackImmutable` 로 거부한다(같은 내용 재빌드는 통과)
 
@@ -162,7 +162,7 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 
 - `KILL_SWITCH` · `EXECUTION_MODE` — `.env.example` 에만 있고 **읽는 코드가 없다**
 - `recent_decisions` 팩 블록 — `decisions` 테이블은 생겼지만 팩에 채우는 배선은 아직 없다
-- `invalidation_hit` — 스키마는 조건 문법으로 바뀌었지만(ADR 0007) **1로 바꾸는 UPDATE 는 아직 없다.** 판정할 코드가 없으니 무효화 조건은 여전히 감시되지 않는다
+- ~~`invalidation_hit`~~ **(2026-08-31 배선)** — `decision/invalidation.py` + `python -m decision.pipeline watch [--apply]`. **감시기는 표시만 하고 청산하지 않는다** — 실행 계층이 0줄이라 킬 스위치 없는 자리에서 상태를 바꾸지 않는다. `stance_reversal` 과 뉴스 기반 재료 소멸은 **여전히 감시되지 않는다**
 - `account.is_mock` — `decision/config.py` 에서 **상수 `True`**. `KIWOOM_ENV` 와 무관하며 **팩에 실려 AI 가 읽는다**
 - 프로브의 `KIWOOM_REST_BASE` 기본값은 **모의 서버**인데, 기록된 A3·A4·B1·D2 측정치는 전부 **실전 서버**에서 나온 것이다. 환경변수 없이 다시 돌리면 그 숫자가 재현되지 않는다
 - ~~키움 모의 앱키가 없다~~ **(2026-08-30 확보)** — 상시모의투자 국내주식 계좌 + 모의 전용 앱키. `KIWOOM_MOCK_APP_KEY`/`_SECRET` 로 `.env` 에 있다. **실전 키는 모의 서버에서 `8030` 으로 거부된다**
