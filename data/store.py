@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -158,8 +158,12 @@ CREATE INDEX IF NOT EXISTS idx_view_day ON briefing_views(day, kind);
 -- ── 페이퍼 포지션 (Phase 3~5) ───────────────────────────
 -- 실행 계층이 생기기 전까지 포지션의 정본. 파생값(평가손익·보유일수·비중)은
 -- 저장하지 않고 조회 시 매번 재계산한다 — 누적 카운터를 두지 않는 원칙.
+-- **arm 마다 독립된 가상 계좌다.** 하나로 합치면 Arm 1 의 매수가 Arm 2 의 현금·비중·
+-- 섹터 한도를 깎아 서로 간섭하고, `Arm1 − Arm2`(F3)·`Arm2 − Arm0`(F2)를 잴 수 없다.
+-- ADR 0005 는 세 arm 의 차이를 재는 법만 정하고 계좌 분리를 적지 않았다 — 그 구멍이다.
 CREATE TABLE IF NOT EXISTS paper_positions (
     position_id       TEXT PRIMARY KEY,
+    arm               INTEGER NOT NULL DEFAULT 1,  -- 0=정량 / 1=브리핑 포함 / 2=브리핑 제외
     code              TEXT NOT NULL,
     name              TEXT,
     qty               INTEGER NOT NULL,
@@ -464,6 +468,19 @@ def _migrate_v16(conn):
     _add_column_if_missing(conn, "order_intents", "fill_price", "INTEGER")
 
 
+def _migrate_v17(conn):
+    """`paper_positions`·`order_intents` 에 arm 을 붙인다.
+
+    **계좌가 하나면 3-arm 대응비교가 불가능하다**(2026-09-01 발견).
+    `cash = 시드 − Σ취득원가 + Σ실현손익` 이 전체 합산이라 Arm 1 의 매수가 Arm 2 의
+    여력을 깎았다. ADR 0005 는 차이를 재는 법만 정하고 계좌 분리를 적지 않았다.
+
+    기존 행은 arm=1 로 둔다 — 지금까지의 기록은 브리핑 포함 판단에서 나왔다.
+    """
+    _add_column_if_missing(conn, "paper_positions", "arm", "INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(conn, "order_intents", "arm", "INTEGER NOT NULL DEFAULT 1")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -480,6 +497,7 @@ _MIGRATIONS: dict[int, object] = {
     14: _migrate_v14,  # decisions.run_kind — 실험 결정을 집행 대상과 가른다
     15: "",  # order_intents 추가 — _SCHEMA 재실행으로 충분 (집행 게이트)
     16: _migrate_v16,  # order_intents 의 가격을 지정가·기준가·체결가로 나눈다
+    17: _migrate_v17,  # arm 별 독립 가상 계좌 (3-arm 대응비교)
 }
 
 

@@ -255,8 +255,13 @@ def supersede(conn: sqlite3.Connection, decision_id: str) -> list[Fill]:
     return out
 
 
-def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str) -> int:
-    """체결된 것만 `paper_positions` 에 반영한다. **주문 대장이 정본이고 여기는 파생이다.**"""
+def apply_fills(
+    conn: sqlite3.Connection, fills: list[Fill], *, day: date | str, arm: int = 1
+) -> int:
+    """체결된 것만 `paper_positions` 에 반영한다. **주문 대장이 정본이고 여기는 파생이다.**
+
+    `arm` 마다 독립된 가상 계좌다 — 섞으면 3-arm 대응비교가 무너진다.
+    """
     from decision import positions as P
 
     day = day.isoformat() if isinstance(day, date) else day
@@ -267,7 +272,8 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
         name = conn.execute("SELECT name FROM listing WHERE code=? LIMIT 1", (f.code,)).fetchone()
         P.open_position(
             conn,
-            position_id=f"{day}-{f.code}",
+            position_id=f"{day}-a{arm}-{f.code}",
+            arm=arm,
             code=f.code,
             name=name[0] if name else f.code,
             qty=f.qty,

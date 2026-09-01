@@ -1146,3 +1146,85 @@ def test_지수가_낡으면_보수적으로_판정한다(tmp_path) -> None:
         # 지수가 8/21 에 멈춰 있고 오늘은 8/27 — 그 사이 장은 실제로 섰다.
         # 지수 봉이 없다고 "0 회 지남"으로 읽으면 낡은 데이터가 최신으로 통과한다.
         assert pack._sessions_missed(conn, "2026-08-21", date(2026, 8, 27)) > 0
+
+
+# ── arm 별 독립 가상 계좌 (3-arm 대응비교) ──────────────
+
+
+def test_arm_마다_계좌가_독립이다(db):
+    """**계좌가 하나면 3-arm 대응비교가 불가능하다**(2026-09-01 발견).
+
+    `cash = 시드 − Σ취득원가 + Σ실현손익` 이 전체 합산이라 Arm 1 의 매수가 Arm 2 의
+    현금·비중·섹터 한도를 깎았다. ADR 0005 는 차이를 재는 법만 정하고 계좌 분리를 적지 않았다.
+    """
+    positions.open_position(
+        db,
+        position_id="a1",
+        arm=1,
+        code="000660",
+        name="SK하이닉스",
+        qty=10,
+        avg_price=50_000,
+        opened_at="2026-08-20T09:00:00+09:00",
+    )
+    seed = 100_000_000
+    a1 = positions.account_state(db, seed, arm=1)
+    a2 = positions.account_state(db, seed, arm=2)
+
+    assert a1["cash_available_krw"] < seed, "arm 1 은 매수했다"
+    assert a2["cash_available_krw"] == seed, "arm 2 는 아무것도 안 샀는데 현금이 줄었다"
+    assert a1["holdings_value_krw"] > 0 and a2["holdings_value_krw"] == 0
+
+
+def test_arm_마다_보유_목록이_다르다(db):
+    for arm, code in ((1, "000660"), (2, "005930")):
+        positions.open_position(
+            db,
+            position_id=f"p{arm}",
+            arm=arm,
+            code=code,
+            name=code,
+            qty=1,
+            avg_price=50_000,
+            opened_at="2026-08-20T09:00:00+09:00",
+        )
+    assert [p["code"] for p in positions.load_open(db, AS_OF, 10**8, arm=1)] == ["000660"]
+    assert [p["code"] for p in positions.load_open(db, AS_OF, 10**8, arm=2)] == ["005930"]
+
+
+def test_당일_손절_종목_금지도_arm_별이다(db):
+    """arm 1 이 손절한 종목을 arm 2 가 못 사면 그것도 간섭이다."""
+    positions.open_position(
+        db,
+        position_id="p1",
+        arm=1,
+        code="000660",
+        name="SK하이닉스",
+        qty=1,
+        avg_price=50_000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    positions.close_position(
+        db, "p1", closed_at="2026-08-20T14:00:00+09:00", exit_price=40_000, exit_reason="stop"
+    )
+    day = date(2026, 8, 20)
+    assert positions.blocked_codes_on(db, day, arm=1) == ["000660"]
+    assert positions.blocked_codes_on(db, day, arm=2) == []
+
+
+def test_실현손익도_arm_별이다(db):
+    positions.open_position(
+        db,
+        position_id="p1",
+        arm=1,
+        code="000660",
+        name="x",
+        qty=1,
+        avg_price=50_000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    positions.close_position(
+        db, "p1", closed_at="2026-08-20T14:00:00+09:00", exit_price=40_000, exit_reason="stop"
+    )
+    assert positions.realized_pnl_total(db, arm=1) < 0
+    assert positions.realized_pnl_total(db, arm=2) == 0
