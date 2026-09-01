@@ -22,3 +22,7 @@ AIK=/home/silverrain/projects/AI_Ktrader
 
 # 체결 판정은 다음 거래일 아침에 한다 — 그날 봉이 들어와야 판정할 수 있다.
 10  8 * * 1-5  cd $AIK && .venv/bin/python -m gate.pipeline settle          >> logs/cron.log 2>&1
+
+# 아침 보고서 — 어제 무슨 일이 있었는지 한 화면. 종료 코드 1 이면 볼 것이 있다.
+# 메일로 받으려면 cron 의 MAILTO 를 쓰거나 파이프로 넘긴다.
+ 5  9 * * 1-5  cd $AIK && .venv/bin/python -m ops.report >> logs/report.log 2>&1

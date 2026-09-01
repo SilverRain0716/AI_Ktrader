@@ -174,3 +174,127 @@ def test_러너가_place_를_부르지_않는다(monkeypatch):
     flat = [" ".join(a) for a in calls]
     assert not any("place" in c for c in flat), f"러너가 주문을 접수했다: {flat}"
     assert any("check" in c for c in flat), "게이트 판정은 해야 한다"
+
+
+# ── 6. 하루 보고서 ──────────────────────────────────────
+
+
+def _dec(
+    conn,
+    did,
+    *,
+    cycle="premarket",
+    arm=1,
+    status="ok",
+    at="2026-09-02T08:25:00+09:00",
+    buys=(),
+    attempt=1,
+):
+    import json as _j
+
+    conn.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,prompt_id,payload) "
+        "VALUES (?,'live',?,'P','s',?,?,?,?,'r1',?,'decision_v4',?)",
+        (
+            did,
+            attempt,
+            arm,
+            cycle,
+            at,
+            at,
+            status,
+            _j.dumps(
+                {
+                    "decisions": [
+                        {"action": "BUY", "code": c, "name": c, "weight_pct": 5} for c in buys
+                    ]
+                }
+            ),
+        ),
+    )
+
+
+def _bar(conn, code, day):
+    conn.execute(
+        "INSERT OR REPLACE INTO ohlcv (code,date,open,high,low,close,volume,halted,source,"
+        "adjusted) VALUES (?,?,1,1,1,1,100,0,'t',1)",
+        (code, day),
+    )
+
+
+def test_보고서가_사이클_결손을_먼저_잡는다(db, caplog):
+    """**자동으로 돌면 안 돈 것도 조용하다.** 실제로 09-01 은 preclose·postmarket 을
+    아예 안 돌렸는데 아무도 몰랐다.
+    """
+    import logging
+
+    from ops import report as rep
+
+    _dec(db, "d1", cycle="premarket")
+    _bar(db, "AAA", "2026-09-02")
+    with caplog.at_level(logging.INFO):
+        rc = rep.report(db, date(2026, 9, 2))
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert rc == 1
+    assert "결손" in msgs and "preclose" in msgs and "postmarket" in msgs
+
+
+def test_사이클이_다_돌면_조용하다(db, caplog):
+    """정상은 조용히, 이상은 크게 — 매일 같은 분량이 쏟아지면 읽지 않게 된다."""
+    import logging
+
+    from ops import report as rep
+
+    for i, c in enumerate(R.JUDGMENT_CYCLES):
+        _dec(db, f"d{i}", cycle=c)
+    _bar(db, "AAA", "2026-09-02")
+    with caplog.at_level(logging.INFO):
+        rc = rep.report(db, date(2026, 9, 2))
+    assert rc == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_일봉이_없으면_알린다(db, caplog):
+    import logging
+
+    from ops import report as rep
+
+    for i, c in enumerate(R.JUDGMENT_CYCLES):
+        _dec(db, f"d{i}", cycle=c)
+    with caplog.at_level(logging.INFO):
+        assert rep.report(db, date(2026, 9, 2)) == 1
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "일봉이 없다" in msgs
+
+
+def test_재시도는_마지막만_보인다(db, caplog):
+    import logging
+
+    from ops import report as rep
+
+    _dec(db, "d1", attempt=1, status="schema_rejected")
+    _dec(db, "d1", attempt=2, status="ok", buys=("AAA",))
+    _bar(db, "AAA", "2026-09-02")
+    with caplog.at_level(logging.INFO):
+        rep.report(db, date(2026, 9, 2))
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "schema_rejected" not in msgs
+
+
+def test_차단된_주문은_경고로_올린다(db, caplog):
+    import logging
+
+    from ops import report as rep
+
+    for i, c in enumerate(R.JUDGMENT_CYCLES):
+        _dec(db, f"d{i}", cycle=c)
+    _bar(db, "AAA", "2026-09-02")
+    db.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+        "created_at,status,reason,arm) VALUES ('i1','d0','AAA','BUY','paper','mock',"
+        "'2026-09-02T09:00:00+09:00','blocked','킬 스위치',1)"
+    )
+    with caplog.at_level(logging.INFO):
+        assert rep.report(db, date(2026, 9, 2)) == 1
+    assert any(r.levelno >= logging.WARNING and "blocked" in r.getMessage() for r in caplog.records)
