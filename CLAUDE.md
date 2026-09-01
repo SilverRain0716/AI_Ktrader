@@ -152,7 +152,7 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 | 문서 | 언제 읽나 |
 |---|---|
 | [`docs/03-current-state.md`](docs/03-current-state.md) | **여기부터.** 지금까지 한 것과 남은 것 |
-| [`docs/adr/`](docs/adr/) | 왜 그렇게 결정했는가. 0004(시크릿)·0005(백테스트 범위)·0006(엣지 가설)·0009(매매 시점)·0010(뉴스·컨텍스트)·0011(급변 스캔)·0012(뉴스 채널)·**0013(매매 원칙)**은 필독 |
+| [`docs/adr/`](docs/adr/) | 왜 그렇게 결정했는가. 0004(시크릿)·0005(백테스트 범위)·0006(엣지 가설)·0009(매매 시점)·0010(뉴스·컨텍스트)·0011(급변 스캔)·0012(뉴스 채널)·**0013(매매 원칙)**·**0014(집행 arm·계좌)**는 필독 |
 | [`docs/01-context-pack-design.md`](docs/01-context-pack-design.md) | 팩 설계. **11장에 고친 결함이 누적된다** |
 | [`docs/phase0-verification.md`](docs/phase0-verification.md) | 실측 체크리스트 35항목. 결과는 [`phase0-results.md`](docs/phase0-results.md) |
 

@@ -141,6 +141,7 @@ def record(conn: sqlite3.Connection, v: Verdict, *, now: datetime | None = None)
     """
     now = now or datetime.now(dcfg.KST)
     env = gcfg.order_target()
+    arm = gcfg.arm_of(v.decision_id)
     reason = "; ".join(v.blockers) or None
     rows = [
         (
@@ -155,12 +156,14 @@ def record(conn: sqlite3.Connection, v: Verdict, *, now: datetime | None = None)
             now.isoformat(timespec="seconds"),
             "allowed" if v.allowed else "blocked",
             reason,
+            arm,
         )
         for o in v.orders
     ]
     conn.executemany(
         "INSERT OR IGNORE INTO order_intents (intent_id,decision_id,code,action,qty,"
-        "limit_price,mode,kiwoom_env,created_at,status,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "limit_price,mode,kiwoom_env,created_at,status,reason,arm) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
     return len(rows)

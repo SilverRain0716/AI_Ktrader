@@ -53,7 +53,7 @@ def task_check(conn, decision_id: str | None, latest: bool, do_record: bool) -> 
         log.error("--decision 또는 --latest 가 필요하다")
         return 2
 
-    v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed())
+    v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed(gcfg.arm_of(decision_id)))
     log.info("결정 %s · 모드 %s", v.decision_id, v.mode)
     for o in v.orders:
         log.info("  주문 후보 %s %s (비중 %s%%)", o["action"], o["code"], o["weight_pct"])
@@ -74,7 +74,18 @@ def task_check(conn, decision_id: str | None, latest: bool, do_record: bool) -> 
     return 0 if v.allowed else 4
 
 
-def _deposit_if_needed() -> int | None:
+def _client_for(arm: int):
+    """그 arm 의 계좌에 붙는 클라이언트. **사람이 계좌를 지정하지 않는다**(ADR 0014)."""
+    import os
+
+    from data.sources.kiwoom import KiwoomClient
+
+    ak, sk = gcfg.credentials_for(arm)
+    os.environ["KIWOOM_APP_KEY"], os.environ["KIWOOM_APP_SECRET"] = ak, sk
+    return KiwoomClient(base=gcfg.order_base())
+
+
+def _deposit_if_needed(arm: int) -> int | None:
     """`mock`/`live` 에서만 계좌를 조회한다. **paper 는 계좌를 건드리지 않는다.**
 
     실패해도 예외를 밖으로 내지 않는다 — `None` 이 곧 "확인 못 했다"이고,
@@ -82,11 +93,10 @@ def _deposit_if_needed() -> int | None:
     """
     if gcfg.mode() not in (gcfg.MOCK, gcfg.LIVE):
         return None
-    from data.sources.kiwoom import KiwoomClient
     from gate import account as gacct
 
     try:
-        return gacct.deposit_krw(KiwoomClient(base=gcfg.order_base()))
+        return gacct.deposit_krw(_client_for(arm))
     except Exception as e:
         log.error("예수금 조회 실패 — %s: %s", type(e).__name__, e)
         return None
@@ -130,7 +140,7 @@ def task_place(conn, decision_id: str | None, latest: bool) -> int:
         log.info("%s 은 abstain 이다 — 신규 접수 없음. 옛 미체결만 폐기했다", decision_id)
         return 0
 
-    v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed())
+    v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed(gcfg.arm_of(decision_id)))
     for n in v.notes:
         log.info("알림: %s", n)
     if not v.allowed:

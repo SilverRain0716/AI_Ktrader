@@ -311,7 +311,10 @@ CREATE TABLE IF NOT EXISTS order_intents (
     -- 집행 결과. 게이트는 여기까지 채우지 않는다 — 어댑터가 생기면 채운다.
     status       TEXT NOT NULL,         -- blocked|allowed|sent|filled|rejected|failed
     reason       TEXT,                  -- 차단·실패 사유
-    broker_ref   TEXT                   -- 증권사 주문번호
+    broker_ref   TEXT,                  -- 증권사 주문번호
+    -- 어느 가상 계좌의 주문인가. **arm 마다 다른 계좌를 쓴다**(ADR 0014) —
+    -- 섞이면 두 계좌가 동시에 오염되고 `Arm1 − Arm2` 를 영영 못 잰다.
+    arm          INTEGER NOT NULL DEFAULT 1
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_dec_code
     ON order_intents(decision_id, code);
