@@ -558,7 +558,8 @@
         "daily_loss_limit_krw",
         "max_order_vs_adv_pct",
         "max_entry_gap_up_atr",
-        "max_entry_gap_down_atr"
+        "max_entry_gap_down_atr",
+        "allowed_entry_types"
       ],
       "additionalProperties": false,
       "properties": {
@@ -621,6 +622,19 @@
           "minimum": 0.05,
           "maximum": 5.0,
           "description": "진입 허용 하방 갭 (ATR 배수). 위와 같은 규칙이며 아래쪽 밴드다."
+        },
+        "allowed_entry_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "MARKET",
+              "LIMIT",
+              "COND"
+            ]
+          },
+          "minItems": 1,
+          "description": "**집행 계층이 실제로 낼 수 있는 진입 방식.** 여기 없는 것을 고르면 게이트가 차단하고 그 결정은 버려진다.\\n\\n`COND` 는 조건이 충족되면 진입하는 방식인데 **그 조건을 감시할 실시간 코드(블록 G)가 0줄**이라 지금은 낼 수 없다 — 모의계좌라도 같다. 위험이 없는 것과 판정할 수 없는 것은 다르다: 조건을 못 보면 언제 들어갔는지도, 왜 안 들어갔는지도 기록에 남지 않는다.\\n\\n팩에 싣는 이유는 [ADR 0003](../docs/adr/0003-ai-decides-last.md) 원칙 1 이다 — **팩에 없는 것은 AI 에게 없다.** 집행되지 않을 진입을 계속 내는 것이 낭비다. 실측(2026-09-02): 이것이 없어서 엔진이 SK이노베이션을 `COND` 로 냈고 게이트가 차단했다."
         }
       }
     },

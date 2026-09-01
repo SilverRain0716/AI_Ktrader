@@ -113,6 +113,30 @@ def evaluate(
             f"만료됨 (valid_until={valid_until}, 지금 {now.isoformat(timespec='seconds')})"
         )
 
+    # 조건부 진입은 **감시할 코드가 없다.** ADR 0009 가 "COND 는 블록 G(실시간 감시)
+    # 전까지 거부한다"고 정했는데 **거부하는 코드가 없었다**(2026-09-02 발견) —
+    # contract.py 는 "COND 면 condition 이 있어야 한다"만 보고, 게이트는 entry.type 을
+    # 아예 안 봤다. 어댑터만 붙으면 감시 못 하는 주문이 그대로 나간다.
+    #
+    # **모의계좌라도 막는다.** 위험이 없는 것과 판정할 수 없는 것은 다르다 —
+    # 조건을 감시할 수 없으면 언제 들어갔는지도, 왜 안 들어갔는지도 기록에 남지 않는다.
+    # **허용 목록은 팩이 정본이다.** 게이트가 따로 상수를 들고 있으면 팩이 말한 것과
+    # 게이트가 막는 것이 갈라진다 — AI 는 팩을 보고 판단했는데 다른 기준으로 차단된다.
+    # 결정 payload 가 아니라 **그 결정이 본 팩**에서 읽는다.
+    from decision import config as _ccfg
+
+    pack_row = conn.execute(
+        "SELECT payload FROM context_packs WHERE pack_id = "
+        "(SELECT pack_id FROM decisions WHERE decision_id = ? LIMIT 1)",
+        (decision_id,),
+    ).fetchone()
+    allowed = set(
+        ((json.loads(pack_row[0]).get("constraints") or {}) if pack_row else {}).get(
+            "allowed_entry_types"
+        )
+        or _ccfg.ALLOWED_ENTRY_TYPES
+    )
+
     orders: list[dict] = []
     if payload:
         seen = _already(conn, decision_id)
@@ -121,6 +145,14 @@ def evaluate(
                 continue  # HOLD 는 주문이 아니다
             if d["code"] in seen:
                 blockers.append(f"{d['code']}: 이미 주문 의도가 남아 있다 — 중복 주문을 막는다")
+                continue
+            entry_type = (d.get("entry") or {}).get("type")
+            if entry_type and entry_type not in allowed:
+                blockers.append(
+                    f"{d['code']}: 진입 방식 {entry_type} 은 집행할 수 없다 "
+                    f"(허용 {sorted(allowed)}). COND 는 조건을 감시할 실시간 코드(블록 G)가 "
+                    "없어서다 — 모의계좌라도 같다 (ADR 0009)"
+                )
                 continue
             orders.append(
                 {
