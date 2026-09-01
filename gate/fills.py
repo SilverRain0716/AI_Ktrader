@@ -147,4 +147,96 @@ def reconcile(conn, executions: list[Execution]) -> dict:
     }
 
 
-__all__ = ["ACNT_PATH", "EXEC_TR", "OPEN_TR", "Execution", "fetch", "reconcile"]
+# ── 포지션 대조 ────────────────────────────────────────
+
+POSITION_TR = "kt00018"  # 계좌평가잔고내역
+
+# 실물 응답을 못 봤다(모의계좌에 보유가 없다). 후보를 두되 **없으면 실패로 남긴다.**
+_P_CODE = ("stk_cd", "stk_code")
+_P_QTY = ("rmnd_qty", "hldg_qty", "cur_qty")
+_P_AVG = ("pur_pric", "avg_prc", "buy_uv")
+
+
+@dataclass(frozen=True)
+class Holding:
+    code: str
+    qty: int
+    avg_price: int
+
+
+def holdings(client) -> tuple[list[Holding], list[str]]:
+    """증권사가 말하는 **실제 보유**. `(읽은 것, 못 읽은 사유)`.
+
+    수량·평단은 **계좌가 정본이다** — 수수료가 이미 반영돼 있고, 부분체결·추가매수도
+    거기서 합쳐진다. 우리가 계산한 값과 다르면 **계좌가 맞다.**
+    """
+    j = client.post(POSITION_TR, ACNT_PATH, {"qry_tp": "1", "dmst_stex_tp": "KRX"})
+    out: list[Holding] = []
+    problems: list[str] = []
+    for row in j.get("acnt_evlt_remn_indv_tot") or []:
+        code = _pick(row, _P_CODE)
+        qty, avg = _num(_pick(row, _P_QTY)), _num(_pick(row, _P_AVG))
+        if not (code and qty is not None and avg is not None):
+            problems.append(
+                f"보유 행을 읽을 수 없다 — 종목={code!r} 수량={qty!r} 평단={avg!r} "
+                f"· 실제 키 {sorted(row)[:8]}"
+            )
+            continue
+        out.append(Holding(code.lstrip("A"), qty, avg))
+    return out, problems
+
+
+def reconcile_positions(conn, held: list[Holding], *, arm: int) -> dict:
+    """계좌의 실제 보유와 `paper_positions` 를 **양방향**으로 맞춘다.
+
+    **계좌가 모르는 것이 우리에게 있다** — 진입 근거(`entry_thesis`)와 무효화 조건이다.
+    그래서 계좌를 정본으로 삼아 우리 것을 지워버릴 수 없다. 대신 **어긋난 곳을 드러낸다.**
+
+    | 어긋남 | 뜻 |
+    |---|---|
+    | 계좌엔 있는데 우리에게 없다 | 체결 확인을 놓쳤거나 **사람이 직접 샀다** |
+    | 우리에겐 있는데 계좌에 없다 | **청산을 놓쳤다** — 무효화 감시가 유령을 보고 있다 |
+    | 수량·평단이 다르다 | 부분체결·추가매수. **계좌가 맞다** |
+
+    **아무것도 고치지 않는다.** 자동으로 맞추면 어느 쪽이 틀렸는지 모른 채 덮인다.
+    """
+    ours = {
+        code: (pid, qty, avg)
+        for pid, code, qty, avg in conn.execute(
+            "SELECT position_id, code, qty, avg_price FROM paper_positions "
+            "WHERE closed_at IS NULL AND arm = ?",
+            (arm,),
+        )
+    }
+    theirs = {h.code: h for h in held}
+    return {
+        "arm": arm,
+        "only_broker": [theirs[c] for c in theirs.keys() - ours.keys()],
+        "only_ours": [(c, *ours[c]) for c in ours.keys() - theirs.keys()],
+        "mismatch": [
+            (c, ours[c][1], ours[c][2], theirs[c].qty, theirs[c].avg_price)
+            for c in ours.keys() & theirs.keys()
+            if ours[c][1] != theirs[c].qty or ours[c][2] != theirs[c].avg_price
+        ],
+        "agreed": len(
+            [
+                c
+                for c in ours.keys() & theirs.keys()
+                if ours[c][1] == theirs[c].qty and ours[c][2] == theirs[c].avg_price
+            ]
+        ),
+    }
+
+
+__all__ = [
+    "ACNT_PATH",
+    "EXEC_TR",
+    "OPEN_TR",
+    "POSITION_TR",
+    "Execution",
+    "Holding",
+    "fetch",
+    "holdings",
+    "reconcile",
+    "reconcile_positions",
+]

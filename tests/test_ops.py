@@ -298,3 +298,116 @@ def test_차단된_주문은_경고로_올린다(db, caplog):
     with caplog.at_level(logging.INFO):
         assert rep.report(db, date(2026, 9, 2)) == 1
     assert any(r.levelno >= logging.WARNING and "blocked" in r.getMessage() for r in caplog.records)
+
+
+# ── 7. 매매 기록 ────────────────────────────────────────
+
+
+def _pos(
+    conn,
+    *,
+    arm=1,
+    code="AAA",
+    qty=10,
+    avg=1000,
+    opened="2026-09-01",
+    closed=None,
+    exit_price=None,
+    reason=None,
+    pnl=None,
+):
+    conn.execute(
+        "INSERT INTO paper_positions (position_id,arm,code,name,qty,avg_price,opened_at,"
+        "closed_at,exit_price,exit_reason,realized_pnl_krw,invalidation_hit) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,0)",
+        (
+            f"p-{arm}-{code}-{opened}",
+            arm,
+            code,
+            code,
+            qty,
+            avg,
+            opened,
+            closed,
+            exit_price,
+            reason,
+            pnl,
+        ),
+    )
+
+
+def _intent(
+    conn, *, arm=1, code="AAA", status="superseded", reason="이월", at="2026-09-01T10:35:00+09:00"
+):
+    conn.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,qty,ref_price,mode,"
+        "kiwoom_env,created_at,status,reason,arm) VALUES (?,'d','?','BUY',1,1000,'paper',"
+        "'mock',?,?,?,?)",
+        (f"i-{arm}-{code}-{status}", at, status, reason, arm),
+    )
+    conn.execute(
+        "UPDATE order_intents SET code=? WHERE intent_id=?", (code, f"i-{arm}-{code}-{status}")
+    )
+
+
+def test_체결과_미체결을_함께_본다(db):
+    """**포지션만 보면 나가지 않은 주문이 안 보인다.**
+
+    실측(09-01): 판단 16번 · 접수 2건 · 포지션 0. 포지션만 보면 "아무 일도 없었다"로
+    읽히지만, 대장에는 이월 금지가 두 건을 폐기했다는 사실이 남아 있다.
+    """
+    from ops import ledger as L
+
+    _intent(db, code="AAA")
+    assert L.trades(db) == []
+    u = L.unfilled(db)
+    assert len(u) == 1 and u[0][5] == "superseded"
+
+
+def test_청산된_것과_보유중인_것을_함께_본다(db):
+    from ops import ledger as L
+
+    _pos(db, code="AAA")  # 보유 중
+    _pos(db, code="BBB", closed="2026-09-02", exit_price=1200, reason="stop", pnl=2000)
+    got = {r[1]: r for r in L.trades(db)}
+    assert got["AAA"][6] is None, "보유 중은 closed_at 이 없다"
+    assert got["BBB"][9] == 2000
+
+
+def test_arm_으로_가른다(db):
+    from ops import ledger as L
+
+    _pos(db, arm=1, code="AAA")
+    _pos(db, arm=2, code="BBB")
+    _intent(db, arm=1, code="CCC")
+    _intent(db, arm=2, code="DDD")
+    assert [r[1] for r in L.trades(db, arm=1)] == ["AAA"]
+    assert [r[1] for r in L.unfilled(db, arm=2)] == ["DDD"]
+
+
+def test_체결된_것은_미체결_목록에_없다(db):
+    from ops import ledger as L
+
+    _intent(db, code="AAA", status="filled")
+    _intent(db, code="BBB", status="blocked")
+    assert [r[1] for r in L.unfilled(db)] == ["BBB"]
+
+
+def test_손익을_다시_계산하지_않는다(db):
+    """수수료·세금 규칙이 바뀌면 과거 손익이 조용히 달라진다."""
+    import inspect
+
+    from ops import ledger as L
+
+    src = inspect.getsource(L.trades)
+    assert "realized_pnl_krw" in src
+    for banned in ("exit_price -", "* qty", "avg_price *"):
+        assert banned not in src, f"손익을 다시 계산한다: {banned}"
+
+
+def test_왜_안_나갔는지가_기록이다(db):
+    """상태 코드만 보여주면 '왜'를 모른다."""
+    from ops import ledger as L
+
+    for st in ("blocked", "superseded", "gapped", "expired"):
+        assert st in L.UNFILLED, f"{st} 의 설명이 없다"

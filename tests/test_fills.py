@@ -133,3 +133,92 @@ def test_체결_조회에_주문_코드가_없다():
     src = (pathlib.Path(gate.__file__).parent / "fills.py").read_text(encoding="utf-8")
     for banned in ("kt10000", "kt10001", "ord_qty", "place_order"):
         assert banned not in src, f"체결 조회에 주문 코드가 들어왔다: {banned}"
+
+
+# ── 4. 포지션 대조 ──────────────────────────────────────
+
+
+def _pos(conn, code, qty, avg, *, arm=1, closed=None):
+    conn.execute(
+        "INSERT INTO paper_positions (position_id,arm,code,name,qty,avg_price,opened_at,"
+        "closed_at) VALUES (?,?,?,?,?,?,'2026-09-01',?)",
+        (f"p-{arm}-{code}", arm, code, code, qty, avg, closed),
+    )
+
+
+def _hold_rows(*rows):
+    return {
+        "return_code": 0,
+        "acnt_evlt_remn_indv_tot": [
+            {"stk_cd": c, "rmnd_qty": str(q), "pur_pric": str(a)} for c, q, a in rows
+        ],
+    }
+
+
+class _Acct:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def post(self, tr, path, body):
+        return self.payload
+
+
+def test_보유를_읽는다():
+    got, bad = gf.holdings(_Acct(_hold_rows(("A005930", 10, 70000))))
+    assert not bad
+    assert got == [gf.Holding("005930", 10, 70000)], "종목코드 앞의 A 를 떼야 한다"
+
+
+def test_읽지_못한_보유를_버리지_않는다():
+    """모의계좌에 보유가 없어 실물 응답을 못 봤다 — 필드명이 어긋나면 드러나야 한다."""
+    got, bad = gf.holdings(_Acct({"return_code": 0, "acnt_evlt_remn_indv_tot": [{"x": 1}]}))
+    assert got == [] and bad and "읽을 수 없다" in bad[0]
+
+
+def test_계좌에만_있으면_우리가_모르는_보유다(db):
+    """체결 확인을 놓쳤거나 **사람이 직접 샀다.**"""
+    r = gf.reconcile_positions(db, [gf.Holding("005930", 10, 70000)], arm=1)
+    assert [h.code for h in r["only_broker"]] == ["005930"]
+    assert r["only_ours"] == [] and r["agreed"] == 0
+
+
+def test_우리에게만_있으면_청산을_놓친_것이다(db):
+    """**무효화 감시가 유령을 보고 있다.**"""
+    _pos(db, "005930", 10, 70000)
+    r = gf.reconcile_positions(db, [], arm=1)
+    assert [x[0] for x in r["only_ours"]] == ["005930"]
+
+
+def test_수량이_다르면_드러낸다(db):
+    """부분체결·추가매수. **계좌가 맞다.**"""
+    _pos(db, "005930", 10, 70000)
+    r = gf.reconcile_positions(db, [gf.Holding("005930", 7, 70000)], arm=1)
+    assert r["mismatch"] == [("005930", 10, 70000, 7, 70000)]
+
+
+def test_평단이_다르면_드러낸다(db):
+    """수수료가 계좌에는 반영돼 있고 우리 계산에는 없다."""
+    _pos(db, "005930", 10, 70000)
+    r = gf.reconcile_positions(db, [gf.Holding("005930", 10, 70120)], arm=1)
+    assert len(r["mismatch"]) == 1
+
+
+def test_arm_을_섞지_않는다(db):
+    """arm 1 계좌 보유를 arm 2 기록과 맞추면 둘 다 어긋난 것으로 보인다 (ADR 0014)."""
+    _pos(db, "005930", 10, 70000, arm=1)
+    r = gf.reconcile_positions(db, [gf.Holding("005930", 10, 70000)], arm=2)
+    assert r["agreed"] == 0 and len(r["only_broker"]) == 1 and r["only_ours"] == []
+
+
+def test_청산된_포지션은_대조하지_않는다(db):
+    _pos(db, "005930", 10, 70000, closed="2026-09-02")
+    r = gf.reconcile_positions(db, [], arm=1)
+    assert r["only_ours"] == []
+
+
+def test_대조는_아무것도_고치지_않는다(db):
+    """자동으로 맞추면 어느 쪽이 틀렸는지 모른 채 덮인다."""
+    _pos(db, "005930", 10, 70000)
+    before = list(db.execute("SELECT * FROM paper_positions"))
+    gf.reconcile_positions(db, [gf.Holding("005930", 7, 70120)], arm=1)
+    assert list(db.execute("SELECT * FROM paper_positions")) == before

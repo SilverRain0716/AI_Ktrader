@@ -249,9 +249,64 @@ def task_fills(conn, *, apply: bool) -> int:
     return 4 if (r["unknown"] or r["unreferenced"] or bad) else 0
 
 
+def task_positions(conn) -> int:
+    """계좌의 실제 보유와 우리 기록을 **양방향**으로 맞춘다. **아무것도 고치지 않는다.**
+
+    자동으로 맞추면 어느 쪽이 틀렸는지 모른 채 덮인다.
+    """
+    from gate import fills as gf
+
+    if gcfg.mode() == gcfg.PAPER:
+        log.info("paper 모드다 — 증권사 계좌에 보유가 없다")
+        return 0
+    problems = gcfg.check_coherent()
+    if problems:
+        for x in problems:
+            log.error("모순: %s", x)
+        return 3
+
+    bad_total = 0
+    names = dict(conn.execute("SELECT code,name FROM listing"))
+    for arm in sorted(gcfg.ARM_KEY_ENV):
+        held, bad = gf.holdings(_client_for(arm))
+        for b in bad:
+            log.error("  %s", b)
+        r = gf.reconcile_positions(conn, held, arm=arm)
+        log.info("arm%d · 계좌 %d종목 · 일치 %d", arm, len(held), r["agreed"])
+        for h in r["only_broker"]:
+            log.error(
+                "   **우리가 모르는 보유** %s %d주 @%s — 체결 확인을 놓쳤거나 사람이 직접 샀다",
+                names.get(h.code, h.code),
+                h.qty,
+                f"{h.avg_price:,}",
+            )
+        for code, _pid, qty, avg in r["only_ours"]:
+            log.error(
+                "   **계좌에 없는 보유** %s %d주 @%s — 청산을 놓쳤다. 무효화 감시가 유령을 본다",
+                names.get(code, code),
+                qty,
+                f"{avg:,}",
+            )
+        for code, oq, oa, tq, ta in r["mismatch"]:
+            log.error(
+                "   **수량·평단 불일치** %s 우리 %d주@%s vs 계좌 %d주@%s — 계좌가 맞다",
+                names.get(code, code),
+                oq,
+                f"{oa:,}",
+                tq,
+                f"{ta:,}",
+            )
+        bad_total += len(r["only_broker"]) + len(r["only_ours"]) + len(r["mismatch"]) + len(bad)
+    if bad_total:
+        log.error(
+            "어긋남 %d건 — **자동으로 고치지 않는다.** 어느 쪽이 틀렸는지 사람이 본다", bad_total
+        )
+    return 4 if bad_total else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="gate.pipeline", description="집행 게이트 (주문 없음)")
-    p.add_argument("task", choices=["status", "check", "place", "settle", "fills"])
+    p.add_argument("task", choices=["status", "check", "place", "settle", "fills", "positions"])
     p.add_argument("--decision", default=None)
     p.add_argument("--latest", action="store_true", help="가장 최근 집행 대상 결정")
     p.add_argument("--record", action="store_true", help="판정을 order_intents 에 남긴다")
@@ -277,7 +332,9 @@ def main(argv: list[str] | None = None) -> int:
             return task_place(conn, args.decision, args.latest)
         if args.task == "settle":
             return task_settle(conn, args.day)
-        return task_fills(conn, apply=args.apply)
+        if args.task == "fills":
+            return task_fills(conn, apply=args.apply)
+        return task_positions(conn)
 
 
 if __name__ == "__main__":
