@@ -1,0 +1,28 @@
+# AI_Ktrader 스케줄 예시 — `crontab -e` 에 붙여 쓴다.
+#
+# **cron 은 저장소 밖이다.** 여기 있는 것은 예시이고, 실제로 도는 것은 사용자 crontab 이다.
+# 그래서 "스케줄을 바꿨는데 안 도는" 사고가 나기 쉽다 — 바꾸면 `crontab -l` 로 확인한다.
+#
+# 러너가 시각을 다시 검사하지 않는다(--cycle 을 명시하므로). cron 이 늦으면 늦은 대로 돈다.
+# 대신 **락**이 중복을 막고, **킬 스위치**가 전체를 멈춘다.
+#
+# 주의: cron 은 PATH·환경변수가 거의 없다. 절대경로를 쓰고 .env 는 python-dotenv 가 읽는다.
+
+SHELL=/bin/bash
+AIK=/home/silverrain/projects/AI_Ktrader
+
+# 판단 사이클 넷 (ADR 0009). 평일만 — 휴장일은 러너가 데이터로 막는다.
+20  8 * * 1-5  cd $AIK && .venv/bin/python -m ops.runner --cycle premarket  >> logs/cron.log 2>&1
+20 12 * * 1-5  cd $AIK && .venv/bin/python -m ops.runner --cycle midday     >> logs/cron.log 2>&1
+ 0 15 * * 1-5  cd $AIK && .venv/bin/python -m ops.runner --cycle preclose   >> logs/cron.log 2>&1
+
+# 장 마감 후 데이터 배치. postmarket 판단보다 **먼저** 와야 한다.
+ 0 18 * * 1-5  cd $AIK && .venv/bin/python -m ops.runner --cycle data       >> logs/cron.log 2>&1
+30 18 * * 1-5  cd $AIK && .venv/bin/python -m ops.runner --cycle postmarket >> logs/cron.log 2>&1
+
+# 체결 판정은 다음 거래일 아침에 한다 — 그날 봉이 들어와야 판정할 수 있다.
+10  8 * * 1-5  cd $AIK && .venv/bin/python -m gate.pipeline settle          >> logs/cron.log 2>&1
+
+# 아침 보고서 — 어제 무슨 일이 있었는지 한 화면. 종료 코드 1 이면 볼 것이 있다.
+# 메일로 받으려면 cron 의 MAILTO 를 쓰거나 파이프로 넘긴다.
+ 5  9 * * 1-5  cd $AIK && .venv/bin/python -m ops.report >> logs/report.log 2>&1

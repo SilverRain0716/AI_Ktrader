@@ -237,9 +237,59 @@ def task_watch(conn, *, apply: bool) -> int:
     return 0
 
 
+def task_stats(conn) -> int:
+    """abstain 비율과 **그것이 옳았는지**를 함께 낸다.
+
+    비율만으로는 좋고 나쁨을 못 정한다 — 시장에 기회가 없으면 안 사는 것이 맞다.
+    abstain 뒤 유니버스가 올랐으면 놓친 것이고, 빠졌으면 피한 것이다.
+    """
+    from decision import stats as S
+
+    rows = S.rates(conn)
+    if not rows:
+        log.info("판단 기록이 없다")
+        return 0
+    log.info("── 프롬프트·arm 별 abstain 비율")
+    log.info("   %-14s %4s %7s %9s %8s", "프롬프트", "arm", "판단", "abstain", "비율")
+    for r in rows:
+        log.info("   %-14s %4d %7d %9d %7.0f%%", r.prompt_id, r.arm, r.total, r.abstain, r.rate)
+
+    opp = S.opportunity(conn)
+    if not opp:
+        log.info("\n── abstain 사후 성과: abstain 기록이 없다")
+        return 0
+    log.info("\n── abstain 뒤 유니버스 중앙 수익률 (양수면 놓친 것, 음수면 피한 것)")
+    log.info("   %-30s %4s %8s %8s %8s", "결정", "arm", *[f"{n}일" for n in S.HORIZONS])
+    ready = {n: [] for n in S.HORIZONS}
+    for o in opp:
+        cells = []
+        for n in S.HORIZONS:
+            v = o[f"r{n}"]
+            cells.append("  대기중" if v is None else f"{v:+7.2f}%")
+            if v is not None:
+                ready[n].append(v)
+        log.info("   %-30s %4d %8s %8s %8s", o["decision_id"], o["arm"], *cells)
+    done = [n for n in S.HORIZONS if ready[n]]
+    if done:
+        log.info(
+            "   %-30s %4s %s",
+            "중앙",
+            "",
+            "".join(
+                f"{__import__('statistics').median(ready[n]):+7.2f}%" if ready[n] else "  대기중"
+                for n in S.HORIZONS
+            ),
+        )
+    log.info(
+        "\n   **표본이 %d건이다.** 며칠 쌓이기 전에는 비율도 사후 성과도 해석하지 않는다",
+        len(opp),
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="decision.pipeline", description="컨텍스트 팩 배치")
-    p.add_argument("task", choices=["build", "decide", "show", "status", "watch"])
+    p.add_argument("task", choices=["build", "decide", "show", "status", "watch", "stats"])
     p.add_argument("--cycle", choices=list(config.CYCLES), default="premarket")
     p.add_argument("--trigger", default=None, help="event 사이클의 트리거 종류")
     p.add_argument("--code", default=None)
@@ -279,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.task == "decide":
             return task_decide(conn, args.pack_id, args.provider, args.model, args.experiment)
+        if args.task == "stats":
+            return task_stats(conn)
         if args.task == "watch":
             return task_watch(conn, apply=args.apply)
         if args.task == "show":
