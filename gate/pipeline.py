@@ -173,13 +173,66 @@ def task_settle(conn, day: str | None) -> int:
     return 0
 
 
+def task_fills(conn, *, apply: bool) -> int:
+    """증권사에 체결을 물어 대장을 맞춘다. **추정하지 않는다.**
+
+    `paper` 에서는 부를 이유가 없다 — 주문이 나가지 않았으므로 계좌에 아무것도 없다.
+    """
+    from data.sources.kiwoom import KiwoomClient
+    from gate import fills as gf
+
+    if gcfg.mode() == gcfg.PAPER:
+        log.info("paper 모드다 — 증권사에 낸 주문이 없다")
+        return 0
+    problems = gcfg.check_coherent()
+    if problems:
+        for x in problems:
+            log.error("모순: %s", x)
+        return 3
+
+    client = KiwoomClient(base=gcfg.order_base())
+    execs, bad = gf.fetch(client)
+    for b in bad:
+        log.error("  %s", b)
+    log.info("체결 내역 %d건 · 읽지 못한 행 %d건", len(execs), len(bad))
+
+    r = gf.reconcile(conn, execs) if apply else None
+    if r is None:
+        for e in execs:
+            log.info("  체결 %s %d주 @%s (주문 %s)", e.code, e.qty, f"{e.price:,}", e.order_no)
+        log.info("--apply 를 주면 대장을 갱신한다")
+        return 0
+    conn.commit()
+    log.info("맞춰진 것 %d · 미체결 %d", len(r["matched"]), len(r["pending"]))
+    if r["unknown"]:
+        for e in r["unknown"]:
+            log.error(
+                "  **대장에 없는 체결** %s %d주 @%s (주문 %s) — 사람이 냈거나 중복이다",
+                e.code,
+                e.qty,
+                f"{e.price:,}",
+                e.order_no,
+            )
+    if r["unreferenced"]:
+        log.error(
+            "  주문번호 없는 sent %d건 — 어댑터가 주문번호를 못 받았다. 대조가 불가능하다",
+            r["unreferenced"],
+        )
+    return 4 if (r["unknown"] or r["unreferenced"] or bad) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="gate.pipeline", description="집행 게이트 (주문 없음)")
-    p.add_argument("task", choices=["status", "check", "place", "settle"])
+    p.add_argument("task", choices=["status", "check", "place", "settle", "fills"])
     p.add_argument("--decision", default=None)
     p.add_argument("--latest", action="store_true", help="가장 최근 집행 대상 결정")
     p.add_argument("--record", action="store_true", help="판정을 order_intents 에 남긴다")
     p.add_argument("--day", default=None, help="settle: 체결을 판정할 거래일 (기본 최신 일봉)")
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help="fills: 조회한 체결로 대장을 갱신한다. 주지 않으면 읽기만 한다",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
     logging.basicConfig(
@@ -194,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
             return task_check(conn, args.decision, args.latest, args.record)
         if args.task == "place":
             return task_place(conn, args.decision, args.latest)
-        return task_settle(conn, args.day)
+        if args.task == "settle":
+            return task_settle(conn, args.day)
+        return task_fills(conn, apply=args.apply)
 
 
 if __name__ == "__main__":

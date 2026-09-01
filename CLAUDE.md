@@ -166,7 +166,10 @@ mypy .                             # CI 에 없다. 대부분 스텁 누락 노�
 - ~~`KILL_SWITCH` · `EXECUTION_MODE`~~ **(2026-09-01 배선)** — `gate/` 패키지가 읽는다.
   **킬 스위치는 파일로도 켜진다**(`<데이터>/KILL`) — 환경변수는 프로세스 시작 시 고정돼
   돌고 있는 배치를 못 멈춘다. **해석할 수 없는 값은 '켜짐'으로 본다.**
-  `python -m gate.pipeline status|check`. **게이트는 주문을 내지 않는다** — 판정만 한다
+  `python -m gate.pipeline status|check|place|settle|fills`. **게이트는 주문을 내지 않는다.**
+  `place` 는 수량을 채워 접수하고, `settle` 은 일봉으로 체결을 **추정**하며(시뮬레이터),
+  `fills` 는 증권사에 **물어서** 대장을 맞춘다(실주문용, 읽기 전용).
+  **주문만 있고 체결 확인이 없으면 최악이다** — 주문은 나가는데 결과를 모른다
 - `recent_decisions` 팩 블록 — `decisions` 테이블은 생겼지만 팩에 채우는 배선은 아직 없다
 - ~~`invalidation_hit`~~ **(2026-08-31 배선)** — `decision/invalidation.py` + `python -m decision.pipeline watch [--apply]`. **감시기는 표시만 하고 청산하지 않는다** — 실행 계층이 0줄이라 킬 스위치 없는 자리에서 상태를 바꾸지 않는다. `stance_reversal` 과 뉴스 기반 재료 소멸은 **여전히 감시되지 않는다**
 - `account.is_mock` — `decision/config.py` 에서 **상수 `True`**. `KIWOOM_ENV` 와 무관하며 **팩에 실려 AI 가 읽는다**
