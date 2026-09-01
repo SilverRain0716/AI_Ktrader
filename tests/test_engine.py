@@ -402,3 +402,98 @@ def test_live_는_같은_팩을_두_번_판단하지_못한다(conn):
     engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())))
     with pytest.raises(sqlite3.IntegrityError):
         engine.decide(conn, pack, 1, client=FakeClient(_resp(_payload())))
+
+
+# ── arm 별 계좌가 팩에도 반영된다 ───────────────────────
+
+
+def test_arm2_는_arm1_의_보유를_자기_것으로_보지_않는다(conn) -> None:
+    """**실측 구멍**(2026-09-01): `derive_arm2` 가 브리핑만 제거하고 계좌를 안 바꿨다.
+
+    그러면 arm 2 가 사지 않은 종목을 들고 있다고 믿고, 현금·비중·손절 금지 목록도
+    남의 것이 된다 — 대응비교의 전제가 무너진다.
+    """
+    from decision import positions as P
+
+    P.open_position(
+        conn,
+        position_id="p1",
+        arm=1,
+        code="000660",
+        name="SK하이닉스",
+        qty=10,
+        avg_price=50_000,
+        opened_at="2026-08-20T09:00:00+09:00",
+    )
+    pack = _pack()
+    a1 = engine.pack_for_arm(pack, 1, conn)
+    a2 = engine.pack_for_arm(pack, 2, conn)
+
+    assert [p["code"] for p in a1["positions"]] == ["000660"]
+    assert a2["positions"] == [], "arm 2 가 arm 1 의 보유를 봤다"
+    assert a2["account"]["cash_available_krw"] > a1["account"]["cash_available_krw"]
+
+
+def test_conn_없이_부르면_브리핑만_제거한다() -> None:
+    """순수 파생이라 DB 없이 테스트가 쓴다. **집행 경로에서는 conn 을 준다.**"""
+    pack = _pack()
+    out = engine.pack_for_arm(pack, 2)
+    assert out["briefings"] == []
+    assert out["account"] == pack["account"], "conn 없이 계좌를 건드렸다"
+
+
+def test_기준일이_없으면_거부한다_계좌를_그대로_쓰지_않는다(conn) -> None:
+    """**조용히 arm 1 계좌를 쓰면 arm 2 가 남의 보유를 자기 것으로 본다.**
+
+    거부 대신 팩을 그대로 돌려주는 것도 같은 사고다 — 예외가 안 나면 그때
+    보유가 샜는지까지 본다.
+    """
+    from decision import positions as P
+
+    P.open_position(
+        conn,
+        position_id="p1",
+        arm=1,
+        code="000660",
+        name="x",
+        qty=1,
+        avg_price=50_000,
+        opened_at="2026-08-20T09:00:00+09:00",
+    )
+    pack = _pack()
+    pack["positions"] = [{"code": "000660", "qty": 1}]
+    pack["data_quality"].pop("ohlcv_as_of", None)
+
+    try:
+        out = engine.pack_for_arm(pack, 2, conn)
+    except engine.DecisionRefused as e:
+        assert "ohlcv_as_of" in str(e)
+        return
+    raise AssertionError(
+        f"거부하지 않고 팩을 돌려줬다 — arm 2 가 보유 {out['positions']} 를 자기 것으로 본다"
+    )
+
+
+def test_손절_금지_목록도_arm_별이다(conn) -> None:
+    from datetime import date as _date
+
+    from decision import positions as P
+
+    P.open_position(
+        conn,
+        position_id="p1",
+        arm=1,
+        code="000660",
+        name="x",
+        qty=1,
+        avg_price=50_000,
+        opened_at="2026-08-19T09:00:00+09:00",
+    )
+    P.close_position(
+        conn, "p1", closed_at="2026-08-20T14:00:00+09:00", exit_price=40_000, exit_reason="stop"
+    )
+    assert _date.fromisoformat(_pack()["data_quality"]["ohlcv_as_of"]) == _date(2026, 8, 20)
+    a1 = engine.pack_for_arm(_pack(), 1, conn)
+    a2 = engine.pack_for_arm(_pack(), 2, conn)
+    assert a1["constraints"]["blocked_codes"] == ["000660"]
+    assert a2["constraints"]["blocked_codes"] == []

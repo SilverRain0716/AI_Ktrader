@@ -21,7 +21,7 @@ import copy
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,35 @@ def prompt_text(prompt_id: str = PROMPT_ID) -> str:
 # ── Arm 2 파생 ──────────────────────────────────────────
 
 
+def swap_account(pack: dict, conn, arm: int) -> dict:
+    """팩의 계좌 블록을 그 arm 것으로 갈아끼운다. **팩을 다시 빌드하지 않는다.**
+
+    계좌는 arm 마다 다르지만 유니버스·뉴스·시장 블록은 같다. 다시 빌드하면 그 사이
+    DB 가 변해 "같은 팩에 대한 대응비교"가 문서상으로만 남는다(ADR 0005).
+
+    이것이 없으면 **arm 2 가 arm 1 의 보유 종목을 자기 것으로 본다** — 사지 않은 것을
+    들고 있다고 믿고, 현금·비중·당일 손절 금지 목록도 남의 것이 된다(2026-09-01 발견).
+    """
+    from decision import config as ccfg
+    from decision import pack as pack_mod
+
+    raw = (pack.get("data_quality") or {}).get("ohlcv_as_of")
+    if not raw:
+        # 팩이 기준일을 안 담고 있으면 어느 날의 계좌인지 정할 수 없다.
+        # **조용히 arm 1 계좌를 쓰지 않는다** — arm 2 가 남의 보유를 자기 것으로 본다.
+        raise DecisionRefused("팩에 data_quality.ohlcv_as_of 가 없어 arm 별 계좌를 만들 수 없다")
+    as_of = date.fromisoformat(raw)
+    blocks = pack_mod.account_blocks(
+        conn, as_of, seed=ccfg.account_seed(), constraints=ccfg.constraints(), arm=arm
+    )
+    out = copy.deepcopy(pack)
+    out["account"] = blocks["account"]
+    out["positions"] = blocks["positions"]
+    out["constraints"]["daily_loss_limit_hit"] = blocks["daily_loss_limit_hit"]
+    out["constraints"]["blocked_codes"] = blocks["blocked_codes"]
+    return out
+
+
 def derive_arm2(pack: dict) -> dict:
     """브리핑 성분을 제거한 입력. **팩을 두 번 빌드하지 않는다.**
 
@@ -130,12 +159,16 @@ def derive_arm2(pack: dict) -> dict:
     return out
 
 
-def pack_for_arm(pack: dict, arm: int) -> dict:
-    if arm == 1:
-        return pack
-    if arm == 2:
-        return derive_arm2(pack)
-    raise DecisionRefused(f"arm={arm} 은 LLM 판단 대상이 아니다 (1 또는 2)")
+def pack_for_arm(pack: dict, arm: int, conn=None) -> dict:
+    """arm 별 입력. `conn` 을 주면 **계좌까지** 그 arm 것으로 바꾼다.
+
+    `conn` 없이 부르면 브리핑만 제거한다 — 순수 파생이라 테스트가 DB 없이 쓴다.
+    다만 **집행 경로에서는 반드시 `conn` 을 준다.** 안 주면 arm 2 가 arm 1 의 계좌를 본다.
+    """
+    if arm not in (1, 2):
+        raise DecisionRefused(f"arm={arm} 은 LLM 판단 대상이 아니다 (1 또는 2)")
+    out = pack if arm == 1 else derive_arm2(pack)
+    return swap_account(out, conn, arm) if conn is not None else out
 
 
 # ── 렌더링 ──────────────────────────────────────────────
@@ -372,7 +405,7 @@ def decide(
     now = now or datetime.now(dcfg.KST)
     provider = provider or _provider(client=client)
     model = providers.resolve_model(provider, model)
-    pack_input = pack_for_arm(pack, arm)
+    pack_input = pack_for_arm(pack, arm, conn)
     rendered = render_input(pack, arm)
     prompt = prompt_text()
     schema = _schema()

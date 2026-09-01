@@ -55,7 +55,10 @@ def _pack() -> dict:
             "daily_loss_limit_hit": False,
             "blocked_codes": [],
         },
-        "data_quality": {"warnings": ["브리핑 결손: us-close", "수급 데이터 없음"]},
+        "data_quality": {
+            "ohlcv_as_of": "2026-08-20",
+            "warnings": ["브리핑 결손: us-close", "수급 데이터 없음"],
+        },
     }
 
 
