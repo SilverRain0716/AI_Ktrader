@@ -112,3 +112,14 @@ def test_통합_적재_뒤_지표_재계산을_알린다():
 
     src = inspect.getsource(dp.task_ohlcv_integrated)
     assert "indicators" in src and "다시 계산" in src
+
+
+def test_거래량_0인_행을_버린다():
+    """**장 시작 전에 돌리면 당일 행이 거래량 0 으로 온다.**
+
+    실측(2026-09-01 06:15): 668종목 전부 OHLC 가 같고 거래량 0 인 09-01 행이 들어왔다.
+    그것을 halted=0 으로 저장하면 "정지 아닌데 거래량 0" 이라는 모순이 남는다.
+    """
+    c, _ = _client([_row(), _row(dt="20260901", q=0)])
+    got = c.daily_chart("005930", base_dt="20260901")
+    assert [b["date"] for b in got] == ["2026-08-31"]

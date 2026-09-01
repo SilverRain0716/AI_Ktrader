@@ -239,8 +239,13 @@ class KiwoomClient:
             o, h, low, c = (
                 kiwoom_price(d.get(k)) for k in ("open_pric", "high_pric", "low_pric", "cur_prc")
             )
-            if not all((o, h, low, c)):
-                continue  # 거래정지일 등 — 0 값 행을 지표에 넣으면 ATR 이 오염된다
+            vol = int(d.get("trde_qty") or 0)
+            if not all((o, h, low, c)) or vol <= 0:
+                # 0 값 행은 거래정지일이거나 **아직 거래가 없는 당일**이다.
+                # 장 시작 전에 돌리면 ka10081 이 당일 행을 거래량 0 으로 주는데
+                # (실측 2026-09-01 06:15: 668종목 전부 OHLC 동일·거래량 0),
+                # 그것을 halted=0 으로 넣으면 "정지 아닌데 거래량 0" 이라는 모순이 남는다.
+                continue
             out.append(
                 {
                     "date": f"{d['dt'][:4]}-{d['dt'][4:6]}-{d['dt'][6:]}",
@@ -248,7 +253,7 @@ class KiwoomClient:
                     "high": h,
                     "low": low,
                     "close": c,
-                    "volume": int(d.get("trde_qty") or 0),
+                    "volume": vol,
                     # 백만원 단위. 억원으로 바꿔 두면 저장소 관례(_eok_krw)와 맞는다
                     "value_eok": float(d.get("trde_prica") or 0) / 100,
                 }
