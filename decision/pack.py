@@ -191,6 +191,32 @@ def _sessions_missed(conn: sqlite3.Connection, last: str, as_of: date) -> int:
     return max(0, days - weekends)
 
 
+def account_blocks(conn, as_of: date, *, seed: dict, constraints: dict, arm: int = 1) -> dict:
+    """`account`·`positions`·계좌 의존 `constraints` 를 **arm 별로** 만든다.
+
+    팩은 한 번만 빌드하지만(ADR 0005 — 두 번 빌드하면 그 사이 DB 가 변한다),
+    **계좌는 arm 마다 다르다.** arm 2 에게 arm 1 의 보유 종목을 보여주면
+    자기가 사지 않은 것을 들고 있다고 믿고, 현금·비중·손절 금지 목록도 남의 것이 된다.
+    """
+    acct = positions.account_state(conn, seed["total_equity_krw"], arm)
+    total_equity = acct["total_equity_krw"]
+    pos = positions.load_open(conn, as_of, total_equity, arm)
+    limit = constraints.get("daily_loss_limit_krw") or 0
+    realized_today = positions.realized_pnl_on(conn, as_of, arm)
+    return {
+        "account": {
+            "total_equity_krw": total_equity,
+            "cash_available_krw": acct["cash_available_krw"],
+            "realized_pnl_today_krw": realized_today,
+            "unrealized_pnl_krw": positions.unrealized_pnl(conn, arm),
+            "is_mock": seed["is_mock"],
+        },
+        "positions": pos,
+        "daily_loss_limit_hit": bool(limit and realized_today <= -abs(limit)),
+        "blocked_codes": positions.blocked_codes_on(conn, as_of, arm),
+    }
+
+
 def check_coverage(conn: sqlite3.Connection) -> dict:
     """유니버스 모집단이 실제로 얼마나 채워져 있는지 본다.
 
@@ -472,9 +498,10 @@ def build(
 
     # 회계 항등식으로 계산한다. total_equity 를 상수로 두면 실현손실이 계좌에서 사라지고,
     # 평가금을 빼서 현금을 구하면 손실이 매수 여력으로 둔갑한다 (치명 A).
-    acct = positions.account_state(conn, seed["total_equity_krw"])
-    total_equity = acct["total_equity_krw"]
-    pos = positions.load_open(conn, as_of, total_equity)
+    # 팩의 기준 arm 은 1(브리핑 포함)이다. arm 2 용 블록은 derive_arm2 가 갈아끼운다.
+    blocks = account_blocks(conn, as_of, seed=seed, constraints=constraints, arm=1)
+    acct = blocks["account"]
+    pos = blocks["positions"]
     held_codes = {p["code"] for p in pos}
 
     uni = universe.build(conn, as_of, now=now, exclude=held_codes)
@@ -516,13 +543,7 @@ def build(
         "generated_at": now.isoformat(timespec="seconds"),
         "cycle": cycle,
         "market": _market_block(conn, cycle),
-        "account": {
-            "total_equity_krw": total_equity,
-            "cash_available_krw": acct["cash_available_krw"],
-            "realized_pnl_today_krw": positions.realized_pnl_on(conn, as_of),
-            "unrealized_pnl_krw": positions.unrealized_pnl(conn),
-            "is_mock": seed["is_mock"],
-        },
+        "account": acct,
         "positions": pos,
         "universe": [c.to_pack_item() for c in uni.candidates],
         "briefings": briefings,
@@ -530,10 +551,8 @@ def build(
         "constraints": {
             **constraints,
             # 하드코딩된 상수였다. 환경변수로 한도를 정성껏 주입해도 아무 효과가 없었다.
-            "daily_loss_limit_hit": bool(
-                limit and positions.realized_pnl_on(conn, as_of) <= -abs(limit)
-            ),
-            "blocked_codes": positions.blocked_codes_on(conn, as_of),
+            "daily_loss_limit_hit": blocks["daily_loss_limit_hit"],
+            "blocked_codes": blocks["blocked_codes"],
         },
         "data_quality": dq,
     }

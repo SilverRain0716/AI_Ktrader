@@ -45,7 +45,7 @@ def _clean_env(monkeypatch, tmp_path):
     monkeypatch.setattr(gcfg, "KILL_FILE", tmp_path / "KILL")
 
 
-def _decision(conn, did="D1", *, run_kind="live", status="ok", valid=None, codes=("005930",)):
+def _decision(conn, did="P-a1", *, run_kind="live", status="ok", valid=None, codes=("005930",)):
     payload = json.dumps(
         {
             "decisions": [
@@ -151,7 +151,7 @@ def test_실계좌는_명시적_승인이_필요하다(db, monkeypatch):
 
     monkeypatch.setenv("AIK_LIVE_ACK", "I_UNDERSTAND")
     # mock/live 는 예수금 확인이 필수다 — 없으면 시드가 잔고를 넘는지 알 수 없다.
-    assert gcheck.evaluate(db, _decision(db, "D2"), now=NOW, deposit_krw=10**12).allowed
+    assert gcheck.evaluate(db, _decision(db, "P2-a1"), now=NOW, deposit_krw=10**12).allowed
 
 
 def test_모르는_모드는_paper_다(monkeypatch):
@@ -192,18 +192,23 @@ def test_만료된_결정은_집행하지_않는다(db):
 
 
 def test_없는_결정은_차단이다(db):
-    assert not gcheck.evaluate(db, "NOPE", now=NOW).allowed
+    assert not gcheck.evaluate(db, "NOPE-a1", now=NOW).allowed
 
 
 # ── 4. 멱등성 ───────────────────────────────────────────
 
 
 def test_같은_결정으로_두_번_주문하지_않는다(db):
-    """어댑터가 응답을 못 줘도(타임아웃) 의도는 남아 재시도가 중복이 되지 않는다."""
+    """어댑터가 응답을 못 줘도(타임아웃) 의도는 남아 재시도가 중복이 되지 않는다.
+
+    **다만 판정 기록만으로는 막지 않는다** — `allowed` 는 아직 주문이 안 나간 상태다.
+    주문이 나간 뒤(`sent` 이상)부터 막는다.
+    """
     did = _decision(db, codes=("005930", "000660"))
     v1 = gcheck.evaluate(db, did, now=NOW)
     assert len(v1.orders) == 2
     gcheck.record(db, v1, now=NOW)
+    db.execute("UPDATE order_intents SET status='sent'")  # 어댑터가 주문을 냈다
 
     v2 = gcheck.evaluate(db, did, now=NOW)
     assert v2.orders == ()
@@ -315,3 +320,79 @@ def test_예수금_파싱은_0으로_접지_않는다():
     assert gacct.deposit_krw(Fake("000000500000000")) == 500_000_000
     assert gacct.deposit_krw(Fake("")) is None
     assert gacct.deposit_krw(Fake("알수없음")) is None
+
+
+def test_판정만_기록된_것은_중복이_아니다(db, monkeypatch):
+    """**기록됨과 주문됨은 다르다.**
+
+    처음에 order_intents 에 행이 있기만 하면 중복으로 봤다. 그 결과
+    `check --record` 뒤에 `place` 를 부르면 **항상 막혔다**(2026-09-01 실측).
+    멱등성이 보호하는 것은 판정 기록이 아니라 **중복 주문**이다.
+    """
+    did = _decision(db)
+    v1 = gcheck.evaluate(db, did, now=NOW)
+    gcheck.record(db, v1, now=NOW)  # allowed 로 남는다
+
+    v2 = gcheck.evaluate(db, did, now=NOW)
+    assert v2.allowed, "판정만 기록됐는데 막혔다"
+    assert len(v2.orders) == len(v1.orders)
+
+
+@pytest.mark.parametrize("status", ["sent", "filled", "gapped", "expired"])
+def test_주문이_나간_뒤에는_막는다(db, status):
+    """어댑터가 응답을 못 줘도(타임아웃) 재시도가 중복 주문이 되면 안 된다."""
+    did = _decision(db)
+    gcheck.record(db, gcheck.evaluate(db, did, now=NOW), now=NOW)
+    db.execute("UPDATE order_intents SET status=?", (status,))
+    v = gcheck.evaluate(db, did, now=NOW)
+    assert not v.allowed and any("이미 주문" in b for b in v.blockers)
+
+
+# ── 7. arm → 계좌 매핑 (ADR 0014) ───────────────────────
+
+
+@pytest.mark.parametrize(
+    ("did", "arm"),
+    [("20260901-1117-midday-a1", 1), ("P-a2", 2), ("P-a1-xvar1", 1)],
+)
+def test_결정_id_에서_arm_을_읽는다(did, arm):
+    assert gcfg.arm_of(did) == arm
+
+
+@pytest.mark.parametrize("bad", ["P", "P-arm1", "20260901-midday", ""])
+def test_arm_을_못_읽으면_거부한다(bad):
+    """추측하면 arm 1 의 주문이 계좌 2 로 나간다 — 두 계좌가 동시에 오염된다."""
+    with pytest.raises(gcfg.GateConfigError):
+        gcfg.arm_of(bad)
+
+
+def test_arm_마다_다른_계좌를_쓴다(monkeypatch):
+    monkeypatch.setenv("KIWOOM_MOCK_APP_KEY", "AAA")
+    monkeypatch.setenv("KIWOOM_MOCK_APP_SECRET", "aaa")
+    monkeypatch.setenv("KIWOOM_MOCK2_APP_KEY", "BBB")
+    monkeypatch.setenv("KIWOOM_MOCK2_APP_SECRET", "bbb")
+    assert gcfg.credentials_for(1) == ("AAA", "aaa")
+    assert gcfg.credentials_for(2) == ("BBB", "bbb")
+
+
+def test_자격증명이_없으면_다른_계좌로_대체하지_않는다(monkeypatch):
+    """**대체하는 순간 두 arm 이 같은 계좌를 쓴다** — 주문이 섞여 F3 를 영영 못 잰다."""
+    monkeypatch.setenv("KIWOOM_MOCK_APP_KEY", "AAA")
+    monkeypatch.setenv("KIWOOM_MOCK_APP_SECRET", "aaa")
+    monkeypatch.delenv("KIWOOM_MOCK2_APP_KEY", raising=False)
+    with pytest.raises(gcfg.GateConfigError, match="대체하지 않는다"):
+        gcfg.credentials_for(2)
+
+
+def test_배정되지_않은_arm_은_차단한다():
+    """Arm 0(정량 랭킹)은 아직 0줄이라 계좌가 없다 — 시뮬레이터로 남긴다."""
+    with pytest.raises(gcfg.GateConfigError, match="배정된 계좌가 없다"):
+        gcfg.credentials_for(0)
+
+
+def test_대장에_arm_이_남는다(db, monkeypatch):
+    """나중에 '이 주문이 어느 계좌로 갔나'를 물을 수 있어야 한다."""
+    monkeypatch.setenv("EXECUTION_MODE", "mock")
+    v = gcheck.evaluate(db, _decision(db, "P-a2"), now=NOW, deposit_krw=10**12)
+    gcheck.record(db, v, now=NOW)
+    assert db.execute("SELECT arm FROM order_intents").fetchone()[0] == 2

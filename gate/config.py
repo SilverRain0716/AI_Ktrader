@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,14 +148,58 @@ def check_coherent() -> list[str]:
     return problems
 
 
+# ── arm → 계좌 매핑 (ADR 0014) ──────────────────────────
+#
+# **arm 1 의 결정이 계좌 2 로 나가면 두 계좌가 동시에 오염된다.** 계좌 2 에는 없어야 할
+# 포지션이 생기고 계좌 1 에는 있어야 할 것이 없다. 되돌리려면 둘 다 손대야 하고,
+# 그 시점의 대응비교는 못 쓴다. 그래서 **사람이 지정하지 않고 arm 이 고른다.**
+#
+# Arm 0(정량 랭킹)은 아직 0줄이라 계좌가 없다 — 시뮬레이터로 남긴다.
+ARM_KEY_ENV = {
+    1: ("KIWOOM_MOCK_APP_KEY", "KIWOOM_MOCK_APP_SECRET"),
+    2: ("KIWOOM_MOCK2_APP_KEY", "KIWOOM_MOCK2_APP_SECRET"),
+}
+
+
+def credentials_for(arm: int) -> tuple[str, str]:
+    """그 arm 의 계좌 자격증명. **없으면 예외다** — 다른 계좌로 대체하지 않는다.
+
+    대체하는 순간 두 arm 이 같은 계좌를 쓰게 되고, 주문이 섞여 `Arm1 − Arm2` 를
+    영영 못 잰다. 그것이 이 매핑이 막으려는 유일한 사고다.
+    """
+    names = ARM_KEY_ENV.get(arm)
+    if names is None:
+        raise GateConfigError(
+            f"arm={arm} 에 배정된 계좌가 없다 (ADR 0014). 집행 가능한 arm: {sorted(ARM_KEY_ENV)}"
+        )
+    ak, sk = ((os.getenv(n) or "").strip() for n in names)
+    if not (ak and sk):
+        raise GateConfigError(
+            f"arm={arm} 의 자격증명이 비어 있다 ({names[0]}/{names[1]}). "
+            "다른 계좌로 대체하지 않는다 — 두 arm 이 같은 계좌를 쓰면 주문이 섞인다"
+        )
+    return ak, sk
+
+
+def arm_of(decision_id: str) -> int:
+    """결정 id 에서 arm 을 읽는다. `<pack_id>-a<arm>[-x<label>]` 형식이다."""
+    m = re.search(r"-a(\d+)(?:-x|$)", decision_id)
+    if not m:
+        raise GateConfigError(f"결정 id 에서 arm 을 읽을 수 없다: {decision_id!r}")
+    return int(m.group(1))
+
+
 __all__ = [
+    "ARM_KEY_ENV",
     "LIVE",
     "MOCK",
     "MODES",
     "PAPER",
     "GateConfigError",
     "KillState",
+    "arm_of",
     "check_coherent",
+    "credentials_for",
     "kill_switch",
     "mode",
     "order_base",

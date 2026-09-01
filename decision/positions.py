@@ -42,14 +42,21 @@ def open_position(
     stop_price: int | None = None,
     target_price: int | None = None,
     max_hold_days: int | None = None,
+    arm: int = 1,
 ) -> None:
+    """페이퍼 포지션을 연다.
+
+    `arm` 은 **어느 가상 계좌인가**다 — 0=정량 / 1=브리핑 포함 / 2=브리핑 제외.
+    섞으면 Arm 1 의 매수가 Arm 2 의 현금을 깎아 3-arm 대응비교가 무너진다.
+    """
     conn.execute(
         """INSERT INTO paper_positions
-           (position_id,code,name,qty,avg_price,opened_at,entry_decision_id,entry_thesis,
+           (position_id,arm,code,name,qty,avg_price,opened_at,entry_decision_id,entry_thesis,
             invalidation,invalidation_hit,stop_price,target_price,max_hold_days)
-           VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
         (
             position_id,
+            arm,
             code,
             name,
             qty,
@@ -108,12 +115,15 @@ def _trading_days_between(conn: sqlite3.Connection, code: str, start: str, end: 
     return int(row[0]) if row else 0
 
 
-def load_open(conn: sqlite3.Connection, as_of: date, total_equity_krw: int) -> list[dict]:
+def load_open(
+    conn: sqlite3.Connection, as_of: date, total_equity_krw: int, arm: int = 1
+) -> list[dict]:
     """열린 포지션을 컨텍스트 팩 형식으로. 파생값은 전부 여기서 재계산한다."""
     rows = conn.execute(
         """SELECT position_id,code,name,qty,avg_price,opened_at,entry_decision_id,entry_thesis,
                   invalidation,invalidation_hit,stop_price,target_price,max_hold_days
-           FROM paper_positions WHERE closed_at IS NULL ORDER BY opened_at""",
+           FROM paper_positions WHERE closed_at IS NULL AND arm = ? ORDER BY opened_at""",
+        (arm,),
     ).fetchall()
 
     out: list[dict] = []
@@ -176,7 +186,7 @@ def _indicators(conn: sqlite3.Connection, code: str) -> dict:
         return {}
 
 
-def blocked_codes_on(conn: sqlite3.Connection, day: date) -> list[str]:
+def blocked_codes_on(conn: sqlite3.Connection, day: date, arm: int = 1) -> list[str]:
     """당일 손실로 청산한 종목. 같은 날 재진입을 막는다.
 
     빈 배열로 하드코딩돼 있었다 — 아침에 손절한 종목을 점심 사이클에서 다시 사도
@@ -185,13 +195,13 @@ def blocked_codes_on(conn: sqlite3.Connection, day: date) -> list[str]:
     rows = conn.execute(
         "SELECT DISTINCT code FROM paper_positions "
         "WHERE closed_at IS NOT NULL AND substr(closed_at,1,10)=? "
-        "AND COALESCE(realized_pnl_krw,0) < 0 ORDER BY code",
-        (day.isoformat(),),
+        "AND COALESCE(realized_pnl_krw,0) < 0 AND arm = ? ORDER BY code",
+        (day.isoformat(), arm),
     ).fetchall()
     return [r[0] for r in rows]
 
 
-def cost_basis(conn: sqlite3.Connection) -> int:
+def cost_basis(conn: sqlite3.Connection, arm: int = 1) -> int:
     """열린 포지션의 **취득원가** 합계 (매수 수수료 포함).
 
     평가금이 아니라 원가다. 현금을 구할 때 평가금을 빼면 손익이 현금으로 둔갑한다 —
@@ -200,22 +210,29 @@ def cost_basis(conn: sqlite3.Connection) -> int:
     """
     total = 0.0
     for qty, avg in conn.execute(
-        "SELECT qty, avg_price FROM paper_positions WHERE closed_at IS NULL"
+        "SELECT qty, avg_price FROM paper_positions WHERE closed_at IS NULL AND arm = ?",
+        (arm,),
     ):
         total += avg * qty * (1 + config.COMMISSION_RATE)
     return round(total)
 
 
-def realized_pnl_total(conn: sqlite3.Connection) -> int:
+def realized_pnl_total(conn: sqlite3.Connection, arm: int = 1) -> int:
     """청산 완료된 포지션의 실현손익 누계. 수수료·거래세가 이미 반영돼 있다."""
     row = conn.execute(
-        "SELECT COALESCE(SUM(realized_pnl_krw), 0) FROM paper_positions WHERE closed_at IS NOT NULL"
+        "SELECT COALESCE(SUM(realized_pnl_krw), 0) FROM paper_positions "
+        "WHERE closed_at IS NOT NULL AND arm = ?",
+        (arm,),
     ).fetchone()
     return int(row[0]) if row else 0
 
 
-def account_state(conn: sqlite3.Connection, seed_krw: int) -> dict:
-    """계좌 상태를 회계 항등식으로 계산한다.
+def account_state(conn: sqlite3.Connection, seed_krw: int, arm: int = 1) -> dict:
+    """계좌 상태를 회계 항등식으로 계산한다. **arm 마다 독립이다.**
+
+    하나로 합치면 Arm 1 의 매수가 Arm 2 의 현금·비중·섹터 한도를 깎아 서로 간섭하고,
+    `Arm1 − Arm2`(F3)·`Arm2 − Arm0`(F2)를 잴 수 없다 — 3-arm 대응비교의 전제가 무너진다.
+    ADR 0005 는 차이를 재는 법만 정하고 계좌 분리를 적지 않았다(2026-09-01 발견).
 
         cash        = 시드 − Σ취득원가 + Σ실현손익
         total_equity = cash + Σ평가금
@@ -223,9 +240,9 @@ def account_state(conn: sqlite3.Connection, seed_krw: int) -> dict:
     `total_equity` 를 상수로 두면 실현손실이 계좌에서 사라지고, 포지션 사이징·비중·
     섹터 한도가 전부 존재하지 않는 자산 위에서 계산된다.
     """
-    cost = cost_basis(conn)
-    realized = realized_pnl_total(conn)
-    holdings = holdings_value(conn)
+    cost = cost_basis(conn, arm)
+    realized = realized_pnl_total(conn, arm)
+    holdings = holdings_value(conn, arm)
     cash = seed_krw - cost + realized
     return {
         "cash_available_krw": cash,
@@ -235,25 +252,27 @@ def account_state(conn: sqlite3.Connection, seed_krw: int) -> dict:
     }
 
 
-def holdings_value(conn: sqlite3.Connection) -> int:
+def holdings_value(conn: sqlite3.Connection, arm: int = 1) -> int:
     total = 0
     for code, qty, avg in conn.execute(
-        "SELECT code, qty, avg_price FROM paper_positions WHERE closed_at IS NULL"
+        "SELECT code, qty, avg_price FROM paper_positions WHERE closed_at IS NULL AND arm = ?",
+        (arm,),
     ):
         cur, _ = _last_close(conn, code)
         total += (cur or avg) * qty
     return total
 
 
-def realized_pnl_on(conn: sqlite3.Connection, day: date) -> int:
+def realized_pnl_on(conn: sqlite3.Connection, day: date, arm: int = 1) -> int:
     row = conn.execute(
-        "SELECT COALESCE(SUM(realized_pnl_krw),0) FROM paper_positions WHERE closed_at LIKE ?",
-        (f"{day.isoformat()}%",),
+        "SELECT COALESCE(SUM(realized_pnl_krw),0) FROM paper_positions "
+        "WHERE closed_at LIKE ? AND arm = ?",
+        (f"{day.isoformat()}%", arm),
     ).fetchone()
     return int(row[0]) if row else 0
 
 
-def unrealized_pnl(conn: sqlite3.Connection) -> int:
+def unrealized_pnl(conn: sqlite3.Connection, arm: int = 1) -> int:
     """평가손익. **순액 기준** — 지금 청산하면 손에 남는 금액이다.
 
     이 모듈의 `net_yield_pct` 는 수수료·거래세를 빼는데 여기서만 총액을 쓰면
@@ -262,7 +281,8 @@ def unrealized_pnl(conn: sqlite3.Connection) -> int:
     """
     total = 0.0
     for code, qty, avg in conn.execute(
-        "SELECT code, qty, avg_price FROM paper_positions WHERE closed_at IS NULL"
+        "SELECT code, qty, avg_price FROM paper_positions WHERE closed_at IS NULL AND arm = ?",
+        (arm,),
     ):
         cur, _ = _last_close(conn, code)
         if cur:

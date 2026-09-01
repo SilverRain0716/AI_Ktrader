@@ -39,6 +39,8 @@ from decision import config as ccfg
 log = logging.getLogger("gate.broker")
 
 SENT, FILLED, EXPIRED, GAPPED = "sent", "filled", "expired", "gapped"
+# 새 사이클의 판단이 나와 옛 주문이 무효가 된 상태. **이월 금지**(ADR 0009 결정 3).
+SUPERSEDED = "superseded"
 
 
 @dataclass(frozen=True)
@@ -135,8 +137,8 @@ class SimBroker:
             else:
                 f = Fill(intent_id, code, SENT, qty, ref)
                 conn.execute(
-                    "UPDATE order_intents SET status=?, qty=? WHERE intent_id=?",
-                    (SENT, qty, intent_id),
+                    "UPDATE order_intents SET status=?, qty=?, ref_price=? WHERE intent_id=?",
+                    (SENT, qty, ref, intent_id),
                 )
             out.append(f)
         return out
@@ -201,7 +203,8 @@ class SimBroker:
             else:
                 price = o  # MARKET 은 시가 체결로 본다
             conn.execute(
-                "UPDATE order_intents SET status=?, limit_price=? WHERE intent_id=?",
+                # **`limit_price` 를 덮지 않는다** — 지시한 지정가와 체결가는 다른 것이다.
+                "UPDATE order_intents SET status=?, fill_price=? WHERE intent_id=?",
                 (FILLED, price, intent_id),
             )
             out.append(Fill(intent_id, code, FILLED, qty, price))
@@ -216,8 +219,49 @@ class SimBroker:
         return Fill(intent_id, code, status, reason=reason)
 
 
-def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str) -> int:
-    """체결된 것만 `paper_positions` 에 반영한다. **주문 대장이 정본이고 여기는 파생이다.**"""
+def supersede(conn: sqlite3.Connection, decision_id: str) -> list[Fill]:
+    """이 결정보다 **오래된** 사이클의 미체결을 폐기한다 (ADR 0009 결정 3).
+
+    > 미체결은 15:20 폐기, 이월 금지. 새 사이클의 결정을 집행하기 전에
+    > 같은 종목의 직전 사이클 잔여 주문을 먼저 취소한다.
+
+    **`abstain` 도 판단이다.** "지금 상황에서는 사지 않는다"가 새 판단이라면,
+    이전 사이클에서 나온 주문은 그 상황에서 나온 것이 아니므로 무효다.
+    실제로 그 구멍이 있었다(2026-09-01): v3 가 접수한 2건이 남아 있는데 v4 가
+    양쪽 arm 모두 abstain 했고, 그대로 두면 **최신 판단과 어긋난 주문이 체결된다.**
+
+    같은 결정에서 나온 주문은 건드리지 않는다 — 재시도가 자기 주문을 지우면 안 된다.
+    """
+    row = conn.execute(
+        "SELECT generated_at FROM decisions WHERE decision_id=? ORDER BY attempt DESC LIMIT 1",
+        (decision_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    stale = conn.execute(
+        "SELECT i.intent_id, i.code FROM order_intents i "
+        "JOIN (SELECT decision_id, MAX(generated_at) g FROM decisions GROUP BY decision_id) d "
+        "  ON d.decision_id = i.decision_id "
+        "WHERE i.status = ? AND i.decision_id <> ? AND d.g < ?",
+        (SENT, decision_id, row[0]),
+    ).fetchall()
+    out = []
+    for intent_id, code in stale:
+        conn.execute(
+            "UPDATE order_intents SET status=?, reason=? WHERE intent_id=?",
+            (SUPERSEDED, f"새 판단({decision_id})이 나와 무효 — 이월 금지 (ADR 0009)", intent_id),
+        )
+        out.append(Fill(intent_id, code, SUPERSEDED, reason="새 판단으로 무효"))
+    return out
+
+
+def apply_fills(
+    conn: sqlite3.Connection, fills: list[Fill], *, day: date | str, arm: int = 1
+) -> int:
+    """체결된 것만 `paper_positions` 에 반영한다. **주문 대장이 정본이고 여기는 파생이다.**
+
+    `arm` 마다 독립된 가상 계좌다 — 섞으면 3-arm 대응비교가 무너진다.
+    """
     from decision import positions as P
 
     day = day.isoformat() if isinstance(day, date) else day
@@ -228,7 +272,8 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
         name = conn.execute("SELECT name FROM listing WHERE code=? LIMIT 1", (f.code,)).fetchone()
         P.open_position(
             conn,
-            position_id=f"{day}-{f.code}",
+            position_id=f"{day}-a{arm}-{f.code}",
+            arm=arm,
             code=f.code,
             name=name[0] if name else f.code,
             qty=f.qty,

@@ -36,6 +36,8 @@ from data import config
 log = logging.getLogger("data.kiwoom")
 
 TOKEN_URL = "/oauth2/token"
+DAILY_CHART_TR = "ka10081"  # 주식일봉차트조회 — 통합(_AL)·수정주가 지원, 600건 소급
+DAILY_CHART_PATH = "/api/dostk/chart"
 STOCK_INFO_TR = "ka10001"  # 주식기본정보요청
 STOCK_INFO_PATH = "/api/dostk/stkinfo"
 
@@ -205,6 +207,58 @@ class KiwoomClient:
         if j.get("return_code") not in (0, None):
             raise KiwoomUnavailable(f"{tr}: {j.get('return_msg')}")
         return j
+
+    # ── 일봉 (통합 거래소) ──────────────────────────────
+
+    def daily_chart(
+        self, code: str, *, base_dt: str, venue: str = "AL", adjusted: bool = True
+    ) -> list[dict]:
+        """일봉. **`venue='AL'` 이 통합(KRX+NXT)이다.**
+
+        네이버 일봉은 KRX 만 담고 그것도 약간 적다. 실측(2026-09-01, 24종목):
+        **우리 DB / 통합 = 중앙 75% · 최소 35%.** NXT 비중이 종목마다 0~65% 로 갈려서
+        단순 배율로 보정할 수 없다 — 종목 간 거래대금 비교가 통째로 왜곡된다.
+
+        `adjusted=True` 가 네이버와 같은 축척이다. 실측: 가온전선이 원본가와는
+        224/267 불일치인데 **수정주가와는 0/267 일치**한다.
+
+        `trde_prica`(거래대금, 백만원)를 그대로 쓴다 — `종가 × 거래량` 근사보다 정확하다.
+        """
+        suffix = "" if venue == "KRX" else f"_{venue}"
+        j = self.post(
+            DAILY_CHART_TR,
+            DAILY_CHART_PATH,
+            {
+                "stk_cd": f"{code}{suffix}",
+                "base_dt": base_dt,
+                "upd_stkpc_tp": "1" if adjusted else "0",
+            },
+        )
+        out = []
+        for d in j.get("stk_dt_pole_chart_qry") or []:
+            o, h, low, c = (
+                kiwoom_price(d.get(k)) for k in ("open_pric", "high_pric", "low_pric", "cur_prc")
+            )
+            vol = int(d.get("trde_qty") or 0)
+            if not all((o, h, low, c)) or vol <= 0:
+                # 0 값 행은 거래정지일이거나 **아직 거래가 없는 당일**이다.
+                # 장 시작 전에 돌리면 ka10081 이 당일 행을 거래량 0 으로 주는데
+                # (실측 2026-09-01 06:15: 668종목 전부 OHLC 동일·거래량 0),
+                # 그것을 halted=0 으로 넣으면 "정지 아닌데 거래량 0" 이라는 모순이 남는다.
+                continue
+            out.append(
+                {
+                    "date": f"{d['dt'][:4]}-{d['dt'][4:6]}-{d['dt'][6:]}",
+                    "open": o,
+                    "high": h,
+                    "low": low,
+                    "close": c,
+                    "volume": vol,
+                    # 백만원 단위. 억원으로 바꿔 두면 저장소 관례(_eok_krw)와 맞는다
+                    "value_eok": float(d.get("trde_prica") or 0) / 100,
+                }
+            )
+        return out
 
     # ── 현재가 ──────────────────────────────────────────
 
