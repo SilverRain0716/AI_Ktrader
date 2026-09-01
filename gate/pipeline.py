@@ -101,7 +101,12 @@ def _latest_live(conn) -> str | None:
 
 
 def task_place(conn, decision_id: str | None, latest: bool) -> int:
-    """게이트를 통과한 의도에 수량을 채워 접수한다. **체결은 아직 아니다.**"""
+    """게이트를 통과한 의도에 수량을 채워 접수한다. **체결은 아직 아니다.**
+
+    **접수 전에 이전 사이클의 미체결을 폐기한다** (ADR 0009 결정 3, 이월 금지).
+    `abstain` 결정에도 폐기는 돈다 — 그것도 판단이고, 옛 주문은 그 상황에서
+    나온 것이 아니다.
+    """
     from datetime import datetime
 
     from data import config as dcfg
@@ -111,6 +116,19 @@ def task_place(conn, decision_id: str | None, latest: bool) -> int:
     if not decision_id:
         log.error("--decision 또는 --latest 가 필요하다")
         return 2
+
+    # **판정보다 먼저 한다.** 게이트가 막든 말든 옛 판단은 이미 무효다.
+    for f in gb.supersede(conn, decision_id):
+        log.warning("  폐기 %s — %s", f.code, f.reason)
+    conn.commit()
+
+    st = conn.execute(
+        "SELECT status FROM decisions WHERE decision_id=? ORDER BY attempt DESC LIMIT 1",
+        (decision_id,),
+    ).fetchone()
+    if st and st[0] == "abstain":
+        log.info("%s 은 abstain 이다 — 신규 접수 없음. 옛 미체결만 폐기했다", decision_id)
+        return 0
 
     v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed())
     for n in v.notes:

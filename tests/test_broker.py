@@ -201,3 +201,81 @@ def test_시뮬레이터는_아무_데도_요청하지_않는다():
     src = (pathlib.Path(gate.__file__).parent / "broker.py").read_text(encoding="utf-8")
     for banned in ("httpx", "requests", "urllib", "KiwoomClient"):
         assert banned not in src, f"시뮬레이터에 네트워크가 들어왔다: {banned}"
+
+
+# ── 6. 이월 금지 (ADR 0009 결정 3) ──────────────────────
+
+
+def _decision_row(conn, did, at, status="ok"):
+    conn.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES (?,'live',1,'P','s',1,'premarket',?,?,'r1',?,'{}')",
+        (did, at, at, status),
+    )
+
+
+def _sent(conn, intent_id, did, code):
+    conn.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+        "created_at,status) VALUES (?,?,?,'BUY','paper','mock','2026-09-01','sent')",
+        (intent_id, did, code),
+    )
+
+
+def test_새_판단이_나오면_옛_미체결을_폐기한다(db):
+    """**실제로 그 구멍이 있었다**(2026-09-01).
+
+    v3 가 접수한 2건이 남아 있는데 v4 가 양쪽 arm 모두 abstain 했다.
+    그대로 두면 최신 판단과 어긋난 주문이 체결된다.
+    """
+    _decision_row(db, "OLD", "2026-09-01T10:35:00+09:00")
+    _decision_row(db, "NEW", "2026-09-01T10:56:00+09:00", status="abstain")
+    _sent(db, "i1", "OLD", "009150")
+
+    out = gb.supersede(db, "NEW")
+    assert [f.status for f in out] == [gb.SUPERSEDED]
+    assert db.execute("SELECT status FROM order_intents").fetchone()[0] == gb.SUPERSEDED
+
+
+def test_자기_주문은_건드리지_않는다(db):
+    """재시도가 자기 주문을 지우면 접수가 사라진다."""
+    _decision_row(db, "D", "2026-09-01T10:35:00+09:00")
+    _sent(db, "i1", "D", "009150")
+    assert gb.supersede(db, "D") == []
+    assert db.execute("SELECT status FROM order_intents").fetchone()[0] == "sent"
+
+
+def test_더_나중_결정의_주문은_건드리지_않는다(db):
+    """옛 결정으로 place 를 다시 부른다고 최신 접수를 지우면 안 된다."""
+    _decision_row(db, "OLD", "2026-09-01T10:35:00+09:00")
+    _decision_row(db, "NEW", "2026-09-01T10:56:00+09:00")
+    _sent(db, "i1", "NEW", "009150")
+    assert gb.supersede(db, "OLD") == []
+    assert db.execute("SELECT status FROM order_intents").fetchone()[0] == "sent"
+
+
+@pytest.mark.parametrize("status", ["filled", "expired", "gapped", "allowed"])
+def test_이미_끝난_것은_폐기하지_않는다(db, status):
+    _decision_row(db, "OLD", "2026-09-01T10:35:00+09:00")
+    _decision_row(db, "NEW", "2026-09-01T10:56:00+09:00")
+    _sent(db, "i1", "OLD", "009150")
+    db.execute("UPDATE order_intents SET status=?", (status,))
+    assert gb.supersede(db, "NEW") == []
+
+
+def test_abstain_결정으로_place_를_불러도_옛_주문이_폐기된다(db, monkeypatch):
+    """**abstain 은 "사지 않는다"는 판단이다** — 옛 주문은 그 상황에서 나온 것이 아니다.
+
+    소스 순서가 아니라 **동작**으로 검사한다. abstain 에서 일찍 빠져나가면
+    폐기가 돌지 않는데, 그것이 정확히 실측된 구멍이었다(2026-09-01).
+    """
+    from gate import pipeline as gp
+
+    _decision_row(db, "OLD", "2026-09-01T10:35:00+09:00")
+    _decision_row(db, "NEW", "2026-09-01T10:56:00+09:00", status="abstain")
+    _sent(db, "i1", "OLD", "009150")
+
+    rc = gp.task_place(db, "NEW", latest=False)
+    assert rc == 0
+    assert db.execute("SELECT status FROM order_intents").fetchone()[0] == gb.SUPERSEDED

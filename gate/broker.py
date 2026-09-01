@@ -39,6 +39,8 @@ from decision import config as ccfg
 log = logging.getLogger("gate.broker")
 
 SENT, FILLED, EXPIRED, GAPPED = "sent", "filled", "expired", "gapped"
+# 새 사이클의 판단이 나와 옛 주문이 무효가 된 상태. **이월 금지**(ADR 0009 결정 3).
+SUPERSEDED = "superseded"
 
 
 @dataclass(frozen=True)
@@ -215,6 +217,42 @@ class SimBroker:
             (status, reason, intent_id),
         )
         return Fill(intent_id, code, status, reason=reason)
+
+
+def supersede(conn: sqlite3.Connection, decision_id: str) -> list[Fill]:
+    """이 결정보다 **오래된** 사이클의 미체결을 폐기한다 (ADR 0009 결정 3).
+
+    > 미체결은 15:20 폐기, 이월 금지. 새 사이클의 결정을 집행하기 전에
+    > 같은 종목의 직전 사이클 잔여 주문을 먼저 취소한다.
+
+    **`abstain` 도 판단이다.** "지금 상황에서는 사지 않는다"가 새 판단이라면,
+    이전 사이클에서 나온 주문은 그 상황에서 나온 것이 아니므로 무효다.
+    실제로 그 구멍이 있었다(2026-09-01): v3 가 접수한 2건이 남아 있는데 v4 가
+    양쪽 arm 모두 abstain 했고, 그대로 두면 **최신 판단과 어긋난 주문이 체결된다.**
+
+    같은 결정에서 나온 주문은 건드리지 않는다 — 재시도가 자기 주문을 지우면 안 된다.
+    """
+    row = conn.execute(
+        "SELECT generated_at FROM decisions WHERE decision_id=? ORDER BY attempt DESC LIMIT 1",
+        (decision_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    stale = conn.execute(
+        "SELECT i.intent_id, i.code FROM order_intents i "
+        "JOIN (SELECT decision_id, MAX(generated_at) g FROM decisions GROUP BY decision_id) d "
+        "  ON d.decision_id = i.decision_id "
+        "WHERE i.status = ? AND i.decision_id <> ? AND d.g < ?",
+        (SENT, decision_id, row[0]),
+    ).fetchall()
+    out = []
+    for intent_id, code in stale:
+        conn.execute(
+            "UPDATE order_intents SET status=?, reason=? WHERE intent_id=?",
+            (SUPERSEDED, f"새 판단({decision_id})이 나와 무효 — 이월 금지 (ADR 0009)", intent_id),
+        )
+        out.append(Fill(intent_id, code, SUPERSEDED, reason="새 판단으로 무효"))
+    return out
 
 
 def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str) -> int:
