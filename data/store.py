@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -297,7 +297,10 @@ CREATE TABLE IF NOT EXISTS order_intents (
     code         TEXT NOT NULL,
     action       TEXT NOT NULL,         -- BUY|ADD|TRIM|EXIT
     qty          INTEGER,
-    limit_price  INTEGER,               -- NULL 이면 시장가
+    -- 세 가격을 나눈다. 하나로 뭉치면 "무엇을 지시했고 무엇에 체결됐나"를 되짚을 수 없다.
+    limit_price  INTEGER,               -- 지시한 지정가. NULL 이면 시장가
+    ref_price    INTEGER,               -- 수량을 정할 때 쓴 기준가 (지정가 또는 전일 종가)
+    fill_price   INTEGER,               -- 실제 체결가
     mode         TEXT NOT NULL,         -- paper|mock|live. 어느 모드에서 만들어졌는가
     kiwoom_env   TEXT NOT NULL,         -- real|mock. 어느 서버를 향했는가
     created_at   TEXT NOT NULL,
@@ -450,6 +453,17 @@ def _migrate_v14(conn):
     _add_column_if_missing(conn, "decisions", "run_kind", "TEXT NOT NULL DEFAULT 'live'")
 
 
+def _migrate_v16(conn):
+    """`order_intents` 의 가격을 셋으로 나눈다.
+
+    `limit_price` 하나가 지시한 지정가·수량 산출 기준가·실제 체결가를 뒤섞고 있었다
+    (2026-09-01 실측: 접수 뒤 대장에 0 이 남고, 체결 시 지정가가 체결가로 덮였다).
+    **대장은 감사 기록이다** — 무엇을 지시했고 무엇에 체결됐는지 되짚을 수 없으면 쓸모가 없다.
+    """
+    _add_column_if_missing(conn, "order_intents", "ref_price", "INTEGER")
+    _add_column_if_missing(conn, "order_intents", "fill_price", "INTEGER")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -465,6 +479,7 @@ _MIGRATIONS: dict[int, object] = {
     13: _migrate_v13,  # margin_grades 를 스냅샷 이력으로 (PK 변경)
     14: _migrate_v14,  # decisions.run_kind — 실험 결정을 집행 대상과 가른다
     15: "",  # order_intents 추가 — _SCHEMA 재실행으로 충분 (집행 게이트)
+    16: _migrate_v16,  # order_intents 의 가격을 지정가·기준가·체결가로 나눈다
 }
 
 

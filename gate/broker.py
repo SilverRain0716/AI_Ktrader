@@ -135,8 +135,8 @@ class SimBroker:
             else:
                 f = Fill(intent_id, code, SENT, qty, ref)
                 conn.execute(
-                    "UPDATE order_intents SET status=?, qty=? WHERE intent_id=?",
-                    (SENT, qty, intent_id),
+                    "UPDATE order_intents SET status=?, qty=?, ref_price=? WHERE intent_id=?",
+                    (SENT, qty, ref, intent_id),
                 )
             out.append(f)
         return out
@@ -201,7 +201,8 @@ class SimBroker:
             else:
                 price = o  # MARKET 은 시가 체결로 본다
             conn.execute(
-                "UPDATE order_intents SET status=?, limit_price=? WHERE intent_id=?",
+                # **`limit_price` 를 덮지 않는다** — 지시한 지정가와 체결가는 다른 것이다.
+                "UPDATE order_intents SET status=?, fill_price=? WHERE intent_id=?",
                 (FILLED, price, intent_id),
             )
             out.append(Fill(intent_id, code, FILLED, qty, price))

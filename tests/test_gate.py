@@ -199,11 +199,16 @@ def test_없는_결정은_차단이다(db):
 
 
 def test_같은_결정으로_두_번_주문하지_않는다(db):
-    """어댑터가 응답을 못 줘도(타임아웃) 의도는 남아 재시도가 중복이 되지 않는다."""
+    """어댑터가 응답을 못 줘도(타임아웃) 의도는 남아 재시도가 중복이 되지 않는다.
+
+    **다만 판정 기록만으로는 막지 않는다** — `allowed` 는 아직 주문이 안 나간 상태다.
+    주문이 나간 뒤(`sent` 이상)부터 막는다.
+    """
     did = _decision(db, codes=("005930", "000660"))
     v1 = gcheck.evaluate(db, did, now=NOW)
     assert len(v1.orders) == 2
     gcheck.record(db, v1, now=NOW)
+    db.execute("UPDATE order_intents SET status='sent'")  # 어댑터가 주문을 냈다
 
     v2 = gcheck.evaluate(db, did, now=NOW)
     assert v2.orders == ()
@@ -315,3 +320,29 @@ def test_예수금_파싱은_0으로_접지_않는다():
     assert gacct.deposit_krw(Fake("000000500000000")) == 500_000_000
     assert gacct.deposit_krw(Fake("")) is None
     assert gacct.deposit_krw(Fake("알수없음")) is None
+
+
+def test_판정만_기록된_것은_중복이_아니다(db, monkeypatch):
+    """**기록됨과 주문됨은 다르다.**
+
+    처음에 order_intents 에 행이 있기만 하면 중복으로 봤다. 그 결과
+    `check --record` 뒤에 `place` 를 부르면 **항상 막혔다**(2026-09-01 실측).
+    멱등성이 보호하는 것은 판정 기록이 아니라 **중복 주문**이다.
+    """
+    did = _decision(db)
+    v1 = gcheck.evaluate(db, did, now=NOW)
+    gcheck.record(db, v1, now=NOW)  # allowed 로 남는다
+
+    v2 = gcheck.evaluate(db, did, now=NOW)
+    assert v2.allowed, "판정만 기록됐는데 막혔다"
+    assert len(v2.orders) == len(v1.orders)
+
+
+@pytest.mark.parametrize("status", ["sent", "filled", "gapped", "expired"])
+def test_주문이_나간_뒤에는_막는다(db, status):
+    """어댑터가 응답을 못 줘도(타임아웃) 재시도가 중복 주문이 되면 안 된다."""
+    did = _decision(db)
+    gcheck.record(db, gcheck.evaluate(db, did, now=NOW), now=NOW)
+    db.execute("UPDATE order_intents SET status=?", (status,))
+    v = gcheck.evaluate(db, did, now=NOW)
+    assert not v.allowed and any("이미 주문" in b for b in v.blockers)

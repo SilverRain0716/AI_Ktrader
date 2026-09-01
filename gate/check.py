@@ -41,11 +41,23 @@ class Verdict:
         return self.allowed and self.mode in (gcfg.MOCK, gcfg.LIVE)
 
 
+# 주문이 **실제로 나간** 상태. `allowed` 는 판정만 된 것이지 아직 안 나갔다.
+PLACED = ("sent", "filled", "gapped", "expired", "rejected", "failed")
+
+
 def _already(conn: sqlite3.Connection, decision_id: str) -> set[str]:
+    """이미 **주문이 나간** 종목. 멱등성이 보호하는 것은 중복 주문이다.
+
+    처음에 `order_intents` 에 행이 있기만 하면 중복으로 봤다. **틀렸다** —
+    `check --record` 가 판정을 남기면 그 뒤 `place` 가 항상 막혔다(2026-09-01 실측).
+    기록됨과 주문됨은 다르다.
+    """
+    marks = ",".join("?" * len(PLACED))
     return {
         r[0]
         for r in conn.execute(
-            "SELECT code FROM order_intents WHERE decision_id = ?", (decision_id,)
+            f"SELECT code FROM order_intents WHERE decision_id = ? AND status IN ({marks})",
+            (decision_id, *PLACED),
         )
     }
 

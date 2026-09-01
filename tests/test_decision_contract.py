@@ -324,3 +324,22 @@ def test_잘못된_실험_라벨을_거부한다(bad):
     """하이픈을 막는 이유는 id 를 되짚을 때 팩 id 와 경계가 흐려지기 때문이다."""
     with pytest.raises(ValueError):
         contract.decision_id("P1", 1, bad)
+
+
+# ── 6. 종목코드 형식 ────────────────────────────────────
+
+
+def test_문자가_섞인_종목코드를_받는다():
+    """**한국 종목코드는 숫자 6자리만이 아니다.**
+
+    실측(2026-09-01): 삼성에피스홀딩스 0126Z0 · 에임드바이오 0009K0 ·
+    삼양바이오팜 0120G0 · 한화머시너리앤서비스홀딩스 0220W0 — 전부 보통주다.
+    숫자만 허용하면 이들이 유니버스에서 조용히 빠진다. 실제로 팩 생성이 거부됐다.
+    """
+    import re
+
+    pat = SCHEMA["$defs"]["stockCode"]["pattern"]
+    for code in ("005930", "0126Z0", "0009K0", "0120G0", "0220W0"):
+        assert re.fullmatch(pat, code), code
+    for bad in ("00593", "0059300", "00593a", "KOSDAQ"):
+        assert not re.fullmatch(pat, bad), bad

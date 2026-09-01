@@ -238,7 +238,7 @@
   "$defs": {
     "stockCode": {
       "type": "string",
-      "pattern": "^[0-9]{6}$",
+      "pattern": "^[0-9][0-9A-Z]{5}$",
       "description": "6자리 종목코드. 계열사(우선주·홀딩스·스팩) 혼동 금지."
     },
     "stance": {
@@ -306,7 +306,7 @@
           "anyOf": [
             {
               "type": "string",
-              "pattern": "^[0-9]{6}$"
+              "pattern": "^[0-9][0-9A-Z]{5}$"
             },
             {
               "type": "null"
