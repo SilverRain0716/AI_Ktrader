@@ -346,6 +346,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.task == "sync":
             task_sync(conn, days=args.days, full=args.full)
             task_reparse(conn)
+            # **파싱만 하고 끝내면 관점이 유니버스에 닿지 않는다.** 코드 없는 관점은
+            # universe._briefing_channel 의 `v.code IS NOT NULL` 에서 조용히 빠진다.
+            # map-codes 를 별도 명령으로만 두었더니 한 번도 실행되지 않았다 (~2026-09-02).
+            task_map_codes(conn)
         elif args.task == "map-codes":
             task_map_codes(conn)
         elif args.task == "reparse":

@@ -532,3 +532,18 @@ def test_브리핑_동기화_실패가_배치를_멈추지_않는다(tmp_path, m
         dp.task_briefings(None, days=3)  # 예외가 밖으로 나오면 안 된다
     assert any("브리핑 동기화 실패" in r.message for r in caplog.records)
     assert any("F3" in r.message for r in caplog.records), "무엇을 잃는지 말하지 않았다"
+
+
+def test_sync_는_코드_매핑까지_한다(tmp_path, monkeypatch):
+    """파싱만 하고 끝내면 관점이 **유니버스에 닿지 않는다.** 코드 없는 관점은
+    universe._briefing_channel 의 `v.code IS NOT NULL` 에서 조용히 빠진다.
+    map-codes 를 별도 명령으로만 두었더니 한 번도 실행되지 않았다 (~2026-09-02).
+    """
+    from briefing import pipeline
+
+    calls: list[str] = []
+    monkeypatch.setattr(pipeline, "task_sync", lambda *a, **k: calls.append("sync"))
+    monkeypatch.setattr(pipeline, "task_reparse", lambda *a, **k: calls.append("reparse"))
+    monkeypatch.setattr(pipeline, "task_map_codes", lambda *a, **k: calls.append("map"))
+    pipeline.main(["sync"])
+    assert calls == ["sync", "reparse", "map"]
