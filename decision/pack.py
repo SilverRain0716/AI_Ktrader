@@ -421,13 +421,22 @@ def _overlay_spot(pack: dict, cycle: str, *, client=None) -> None:
     그 3종목의 등락률이 다른 17종목과 다른 것을 재게 되고, 그 사실이 겉으로 안 보인다.
     """
     dq = pack["data_quality"]
+
+    def _blank() -> None:
+        """장중 값이 없다는 것을 **필드로 말한다.** 키가 아예 없으면 AI 는
+        `indicators` 를 지금 값으로 읽는다 — 그것이 이 함수가 막으려던 일이다."""
+        for item in pack["universe"] + pack["positions"]:
+            item["spot"] = None
+
     if cycle not in LIVE_SESSIONS:
         dq["price_source"] = "daily_close"
+        _blank()
         return
 
     codes = [u["code"] for u in pack["universe"]] + [p["code"] for p in pack["positions"]]
     if not codes:
         dq["price_source"] = "daily_close"
+        _blank()
         return
 
     try:
@@ -449,17 +458,30 @@ def _overlay_spot(pack: dict, cycle: str, *, client=None) -> None:
             f"장중 현재가 {len(failed)}종목 결손 — 섞지 않고 전 거래일 종가로 통일했다. ({sample})"
         )
         log.warning("장중 현재가 결손 %d종목: %s", len(failed), failed)
+        _blank()
         return
 
+    # **`indicators` 를 덮지 않는다.** 예전에는 close·change_pct 만 장중으로 바꿔
+    # 놓았는데, 같은 블록의 volume_ratio·rsi14·수급은 전 거래일 값 그대로였다.
+    # 어느 필드가 언제 것인지 팩 어디에도 없어서 두 arm 모두 섞어 말했다 —
+    # *"09시55분 기준 거래대금은 20일 평균의 0.62배"* 는 사실 전 거래일 하루치다
+    # (2026-09-02 미드데이 실측). 이 함수의 주석이 이미 *"섞느니 통째로 전일
+    # 종가를 쓴다"* 고 말하고 있었는데, 그 규칙을 함수 자신이 어기고 있었다.
     for item in pack["universe"]:
         q = quotes[item["code"]]
-        ind = item.setdefault("indicators", {})
-        ind["close"] = q.price
-        if q.change_pct is not None:
-            ind["change_pct"] = q.change_pct
+        item["spot"] = {
+            "price": q.price,
+            "change_pct": q.change_pct,
+            "as_of": q.as_of,
+        }
     for pos in pack["positions"]:
         q = quotes[pos["code"]]
+        pos["spot"] = {"price": q.price, "change_pct": q.change_pct, "as_of": q.as_of}
+        # 가격만 바꾸고 수익률을 두면 한 종목 안에서 값이 서로 어긋난다.
         pos["current_price"] = q.price
+        avg = pos.get("avg_price")
+        if avg:
+            pos["net_yield_pct"] = round(positions.net_yield_pct(avg, q.price), 2)
 
     dq["price_source"] = "intraday"
     dq["price_as_of"] = max(q.as_of for q in quotes.values())

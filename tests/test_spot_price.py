@@ -147,9 +147,17 @@ def test_장중_사이클은_현재가로_덮는다(cycle) -> None:
 
     assert p["data_quality"]["price_source"] == "intraday"
     assert p["data_quality"]["price_as_of"]
-    assert p["universe"][0]["indicators"]["close"] == 257000
-    assert p["universe"][0]["indicators"]["change_pct"] == -3.38
+    # 장중 값은 **spot 에만** 담는다
+    assert p["universe"][0]["spot"]["price"] == 257000
+    assert p["universe"][0]["spot"]["change_pct"] == -3.38
     assert p["positions"][0]["current_price"] == 257000
+    # **indicators 는 건드리지 않는다.** 예전에는 close·change_pct 만 장중으로
+    # 바꿔 놓아서 같은 블록의 volume_ratio·rsi14 와 시점이 갈렸고, 그 사실이
+    # 팩 어디에도 없었다 (2026-09-02 두 arm 모두 섞어 말했다).
+    assert (
+        p["universe"][0]["indicators"]["close"]
+        == _pack_stub()["universe"][0]["indicators"]["close"]
+    )
 
 
 @pytest.mark.parametrize("cycle", ["premarket", "postmarket"])
@@ -262,3 +270,30 @@ def test_페이싱이_실제로_기다린다() -> None:
     c.spot("005930")
     c.spot("005930")
     assert _t.monotonic() - t0 >= kiwoom.MOCK_MIN_INTERVAL_SEC
+
+
+def test_장중_값을_못_받으면_spot_은_null_이다() -> None:
+    """키가 아예 없으면 AI 는 `indicators` 를 지금 값으로 읽는다 —
+    이 함수가 막으려던 바로 그 일이다. **없다는 것을 필드로 말한다.**
+    """
+    from decision import pack as packmod
+
+    p = _pack_stub()
+    packmod._overlay_spot(p, "premarket", client=None)
+    assert p["universe"][0]["spot"] is None
+    assert p["positions"][0]["spot"] is None
+
+
+def test_장중이면_수익률도_같이_고친다() -> None:
+    """가격만 바꾸고 수익률을 두면 **한 종목 안에서 값이 서로 어긋난다.**"""
+    from decision import pack as packmod
+
+    p = _pack_stub()
+    pos = p["positions"][0]
+    pos["avg_price"] = 200000
+    pos["net_yield_pct"] = 30.0  # 전 거래일 종가 기준으로 계산돼 있던 값
+    before = pos["net_yield_pct"]
+    packmod._overlay_spot(p, "midday", client=_client(QUOTES))
+    assert pos["current_price"] == 257000
+    assert pos["net_yield_pct"] != before
+    assert pos["net_yield_pct"] > 0  # 200,000 → 257,000
