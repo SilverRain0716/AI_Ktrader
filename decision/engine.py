@@ -349,6 +349,7 @@ def save_decision(conn: sqlite3.Connection, row: dict) -> None:
         "unmonitorable",
         "request_id",
         "input_tokens",
+        "cached_input_tokens",
         "output_tokens",
         "latency_ms",
     ]
@@ -455,6 +456,7 @@ def decide(
             raw_response=got.raw,
             request_id=got.request_id,
             input_tokens=got.input_tokens,
+            cached_input_tokens=got.cached_input_tokens,
             output_tokens=got.output_tokens,
             latency_ms=got.latency_ms,
         )

@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -237,6 +237,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     unmonitorable  INTEGER,             -- 감시 불가 건수. 높아지면 enum 을 재검토한다
     request_id     TEXT,
     input_tokens   INTEGER,
+    -- 입력 중 캐시로 싸게 온 몫. **NULL 은 "모른다"이고 0 과 다르다** —
+    -- 0 으로 두면 캐시가 안 먹은 것과 재지 못한 것이 구분되지 않는다.
+    cached_input_tokens INTEGER,
     output_tokens  INTEGER,
     latency_ms     INTEGER,
     PRIMARY KEY (decision_id, attempt)
@@ -484,6 +487,12 @@ def _migrate_v17(conn):
     _add_column_if_missing(conn, "order_intents", "arm", "INTEGER NOT NULL DEFAULT 1")
 
 
+def _migrate_v18(conn: sqlite3.Connection) -> None:
+    """캐시 적중률을 재려면 칸이 있어야 한다. **기존 행은 NULL 로 둔다** —
+    소급해 0 을 넣으면 "캐시가 안 먹었다"는 없는 측정이 생긴다."""
+    _add_column_if_missing(conn, "decisions", "cached_input_tokens", "INTEGER")
+
+
 _MIGRATIONS: dict[int, object] = {
     2: "",  # disclosures 테이블 추가 — _SCHEMA 재실행으로 충분
     3: "",  # briefings·briefing_views 추가 — _SCHEMA 재실행으로 충분
@@ -501,6 +510,7 @@ _MIGRATIONS: dict[int, object] = {
     15: "",  # order_intents 추가 — _SCHEMA 재실행으로 충분 (집행 게이트)
     16: _migrate_v16,  # order_intents 의 가격을 지정가·기준가·체결가로 나눈다
     17: _migrate_v17,  # arm 별 독립 가상 계좌 (3-arm 대응비교)
+    18: _migrate_v18,  # decisions.cached_input_tokens — 캐시 적중률을 잰다
 }
 
 

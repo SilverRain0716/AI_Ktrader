@@ -202,3 +202,50 @@ def test_짝_결과에_제공자가_기록된다(conn) -> None:
     out = engine.decide_pair(conn, _pack(), provider=p)
     assert out["provider"] == "anthropic"
     assert out["model"] == providers.AnthropicProvider.default_model
+
+
+# ── 캐시 적중 ───────────────────────────────────────────
+
+
+def test_openai_캐시된_입력을_싣는다() -> None:
+    """비용의 대부분이 입력이고, 캐시된 몫은 정가의 1/10 이다.
+    **재지 않으면 같은 토큰 수가 열 배까지 차이난다.**
+    """
+    r = _openai_resp(_payload())
+    r.usage.input_tokens_details = types.SimpleNamespace(cached_tokens=700)
+    p = providers.get("openai", client=FakeOpenAI(r))
+    got = p.call(model="m", system="s", user="u", schema={}, params={})
+    assert got.cached_input_tokens == 700
+    # OpenAI 는 캐시된 몫을 input_tokens 에 **포함해서** 보고한다
+    assert got.input_tokens == 900
+    assert got.cache_hit_pct == pytest.approx(77.8)
+
+
+def test_제공자가_안_주면_0_이_아니라_모른다() -> None:
+    """0 으로 두면 *캐시가 안 먹었다* 와 *재지 못했다* 가 구분되지 않고,
+    없는 개선 여지를 만들어낸다."""
+    p = providers.get("openai", client=FakeOpenAI(_openai_resp(_payload())))
+    got = p.call(model="m", system="s", user="u", schema={}, params={})
+    assert got.cached_input_tokens is None
+    assert got.cache_hit_pct is None
+
+
+def test_anthropic_은_캐시_읽기를_따로_준다() -> None:
+    """Anthropic 은 `cache_read_input_tokens` 를 input_tokens 와 **별도로** 준다."""
+    r = _resp(_payload())
+    r.usage.cache_read_input_tokens = 500
+    p = providers.get("anthropic", client=FakeClient(r))
+    got = p.call(model="m", system="s", user="u", schema={}, params={"max_tokens": 10})
+    assert got.cached_input_tokens == 500
+
+
+def test_캐시_토큰이_결정행에_남는다(conn) -> None:
+    """Reply 까지만 오고 DB 에 안 남으면 **어제 적중률을 물을 수 없다.**"""
+    r = _openai_resp(_payload())
+    r.usage.input_tokens_details = types.SimpleNamespace(cached_tokens=600)
+    prov = providers.get("openai", client=FakeOpenAI(r))
+    row = engine.decide(conn, _pack(), 1, provider=prov)
+    got = conn.execute(
+        "SELECT cached_input_tokens FROM decisions WHERE decision_id=?", (row["decision_id"],)
+    ).fetchone()
+    assert got[0] == 600
