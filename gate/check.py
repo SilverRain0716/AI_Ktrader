@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from data import config as dcfg
+from decision import selection
 from gate import config as gcfg
 
 
@@ -34,6 +35,9 @@ class Verdict:
     # 막지는 않지만 사람이 알아야 하는 것. **차단과 섞지 않는다** —
     # 섞으면 못 막을 것을 막거나 막아야 할 것을 흘린다.
     notes: tuple[str, ...] = ()
+    # 순위에 밀려 이번에 담기지 않은 후보. **버리지 않고 남긴다** —
+    # "3위를 잘랐는데 그게 더 올랐나" 를 나중에 셀 수 있어야 한다.
+    deferred: tuple[dict, ...] = ()
 
     @property
     def sends_orders(self) -> bool:
@@ -138,11 +142,35 @@ def evaluate(
     )
 
     orders: list[dict] = []
+    deferred: list[dict] = []
     if payload:
         seen = _already(conn, decision_id)
-        for d in json.loads(payload).get("decisions") or []:
+        body = json.loads(payload)
+        # **자르는 곳은 decision.selection 하나뿐이다.** 게이트가 따로 자르면
+        # 엔진이 검증한 조합과 여기서 주문하는 조합이 갈라진다 (ADR 0009).
+        con = (json.loads(pack_row[0]).get("constraints") or {}) if pack_row else {}
+        pack_universe = {
+            u["code"]: u
+            for u in ((json.loads(pack_row[0]).get("universe") or []) if pack_row else [])
+        }
+        all_ds = body.get("decisions") or []
+        entries = [d for d in all_ds if d.get("action") in selection.NEW_ACTIONS]
+        sel = selection.select(
+            entries,
+            constraints=con,
+            held={p["code"]: p for p in (body.get("positions") or [])},
+            exits={d["code"] for d in all_ds if d.get("action") == "EXIT"},
+            universe=pack_universe,
+        )
+        keep = sel.taken_codes
+        for d, why in sel.deferred:
+            deferred.append({"code": d["code"], "action": d["action"], "reason": why})
+            notes.append(f"{d['code']}: 이번에는 담지 않았다 — {why}")
+        for d in all_ds:
             if d.get("action") not in ("BUY", "ADD", "TRIM", "EXIT"):
                 continue  # HOLD 는 주문이 아니다
+            if d.get("action") in selection.NEW_ACTIONS and d["code"] not in keep:
+                continue  # 순위에 밀렸다. 차단이 아니라 **이번 사이클에 안 담은 것**이다
             if d["code"] in seen:
                 blockers.append(f"{d['code']}: 이미 주문 의도가 남아 있다 — 중복 주문을 막는다")
                 continue
@@ -163,7 +191,15 @@ def evaluate(
                 }
             )
 
-    return Verdict(decision_id, not blockers, m, tuple(blockers), tuple(orders), tuple(notes))
+    return Verdict(
+        decision_id,
+        not blockers,
+        m,
+        tuple(blockers),
+        tuple(orders),
+        tuple(notes),
+        tuple(deferred),
+    )
 
 
 def record(conn: sqlite3.Connection, v: Verdict, *, now: datetime | None = None) -> int:
@@ -191,6 +227,25 @@ def record(conn: sqlite3.Connection, v: Verdict, *, now: datetime | None = None)
             arm,
         )
         for o in v.orders
+    ]
+    # 순위에 밀린 후보도 남긴다. **버리면 셀 수 없다** — 나중에 "3위를 잘랐는데
+    # 그게 더 올랐나" 를 물으려면 무엇을 안 샀는지가 기록에 있어야 한다.
+    rows += [
+        (
+            f"{v.decision_id}-{d['code']}",
+            v.decision_id,
+            d["code"],
+            d["action"],
+            None,
+            None,
+            v.mode,
+            env,
+            now.isoformat(timespec="seconds"),
+            "deferred",
+            d["reason"],
+            arm,
+        )
+        for d in v.deferred
     ]
     conn.executemany(
         "INSERT OR IGNORE INTO order_intents (intent_id,decision_id,code,action,qty,"

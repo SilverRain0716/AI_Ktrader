@@ -528,3 +528,56 @@ def test_팩이_허용_진입방식을_싣는다():
     from decision import pack as pk
 
     assert "allowed_entry_types" in inspect.getsource(pk.build)
+
+
+def test_게이트는_순위에_밀린_후보를_주문하지_않는다(db):
+    """자르는 곳은 selection 하나다. 게이트가 전부 주문하면 **엔진이 검증한 조합과
+    실제로 나가는 조합이 갈라진다** — 어느 쪽도 근거가 되지 못한다.
+    """
+    import json as _j
+
+    db.execute(
+        "INSERT INTO context_packs (pack_id,cycle,generated_at,universe_size,position_count,"
+        "view_count,warning_count,payload) VALUES ('PR','premarket',?,3,0,0,0,?)",
+        (
+            NOW.isoformat(),
+            _j.dumps(
+                {
+                    "constraints": {
+                        "allowed_entry_types": ["MARKET"],
+                        "max_new_entries_this_cycle": 2,
+                    },
+                    "universe": [],
+                }
+            ),
+        ),
+    )
+    ds = [
+        {
+            "action": "BUY",
+            "code": c,
+            "name": c,
+            "weight_pct": 10,
+            "rank": r,
+            "entry": {"type": "MARKET"},
+        }
+        for c, r in (("005930", 1), ("000660", 2), ("035720", 3))
+    ]
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('R-a1','live',1,'PR','s',1,'premarket',?,?,'r1','ok',?)",
+        (NOW.isoformat(), (NOW + timedelta(hours=5)).isoformat(), _j.dumps({"decisions": ds})),
+    )
+    v = gcheck.evaluate(db, "R-a1", now=NOW)
+    assert [o["code"] for o in v.orders] == ["005930", "000660"]
+    # 3위는 **차단이 아니다.** 막힌 것이 아니라 이번에 안 담은 것이다
+    assert v.allowed
+    assert [d["code"] for d in v.deferred] == ["035720"]
+    assert any("035720" in n for n in v.notes)
+
+    gcheck.record(db, v, now=NOW)
+    got = db.execute(
+        "SELECT status FROM order_intents WHERE decision_id='R-a1' AND code='035720'"
+    ).fetchone()
+    assert got and got[0] == "deferred", "밀린 후보를 남기지 않으면 나중에 셀 수 없다"

@@ -100,7 +100,10 @@ def test_arm_에_따라_입력이_다르다() -> None:
             "보유 종목이 아니다",
         ),
         ([_decision(weight_pct=40.0)], "종목 한도"),
-        ([_decision(), _decision(code="035720"), _decision(code="000270")], "신규 진입 3건"),
+        # 개수는 더 이상 거부 사유가 아니다 — 순위대로 기계가 자른다 (ADR 0009).
+        # 대신 **자를 수 없게 만드는 것**을 잡는다: 순위 결측과 중복.
+        ([_decision(rank=None)], "rank 가 없다"),
+        ([_decision(), _decision(code="035720", rank=1)], "겹친다"),
         ([_decision(briefing_refs=["없는브리핑"])], "입력에 없다"),
         (
             [
@@ -125,12 +128,26 @@ def test_정상_결정은_통과한다() -> None:
     assert engine.validate(_payload(), p, 1) == []
 
 
-def test_섹터_한도를_강제한다() -> None:
-    """보유분과 신규를 합쳐 센다 — 신규만 보면 이미 찬 섹터에 더 담는다."""
+def test_섹터_한도는_거부가_아니라_미룸이다() -> None:
+    """보유분과 신규를 합쳐 센다 — 신규만 보면 이미 찬 섹터에 더 담는다.
+
+    한도를 넘는 후보는 **판단 전체를 거부시키지 않는다.** 순위에 밀린 것처럼
+    미뤄질 뿐이다 — 3위가 섹터에 걸렸다고 1위까지 버리면 개수 제한과 같아진다.
+    """
+    from decision import selection
+
     p = _pack()
     p["constraints"]["max_weight_pct_per_sector"] = 15.0
     # 000660(반도체) 10% 보유 + 005930(반도체) 10% 신규 = 20% > 15%
-    assert any("섹터" in x for x in engine.validate(_payload(), p, 1))
+    assert engine.validate(_payload(), p, 1) == []
+    sel = selection.select(
+        [_decision()],
+        constraints=p["constraints"],
+        held={x["code"]: x for x in p["positions"]},
+        universe={u["code"]: u for u in p["universe"]},
+    )
+    assert sel.taken == ()
+    assert "섹터" in sel.deferred[0][1]
 
 
 def test_유동성_한도를_강제한다() -> None:
@@ -259,6 +276,7 @@ def test_감시_불가한_invalidation_이_세어진다(conn) -> None:
         _decision(),
         _decision(
             code="000270",
+            rank=2,
             invalidation={"type": "unstructured", "value": None, "deadline": None, "text": "느낌"},
         ),
     ]
