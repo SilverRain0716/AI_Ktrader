@@ -515,3 +515,20 @@ def test_손절_금지_목록도_arm_별이다(conn) -> None:
     a2 = engine.pack_for_arm(_pack(), 2, conn)
     assert a1["constraints"]["blocked_codes"] == ["000660"]
     assert a2["constraints"]["blocked_codes"] == []
+
+
+def test_장중이면_지금_값으로_거리를_잰다() -> None:
+    """전 거래일 종가에 대고 재면 **오전에 크게 움직인 날 정상적인 지정가가 거부된다.**
+
+    2026-09-02 에 팩의 `indicators` 는 전 거래일 값으로 통일하고 장중 값을 `spot` 으로
+    분리했다. 물리 검사가 그 분리를 따라가지 않으면, 팩은 고쳤는데 검사는 어제를 본다.
+    """
+    p = _pack()
+    p["universe"][0]["spot"] = {"price": 84000, "change_pct": 20.0, "as_of": "x"}
+    # 전 거래일 종가 70,000 대비로는 20% 벌어졌지만, 지금 값 84,000 대비로는 1.2% 다
+    payload = _payload([_decision(entry={"type": "LIMIT", "price": 83000})])
+    assert engine.validate(payload, p, 1) == []
+
+    # spot 이 없으면(장 밖·시세 결손) 전 거래일 종가가 기준이다
+    p["universe"][0]["spot"] = None
+    assert any("벌어졌다" in x for x in engine.validate(payload, p, 1))

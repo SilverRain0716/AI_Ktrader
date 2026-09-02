@@ -54,7 +54,7 @@ RENDER_VERSION = "r1"
 # v5: 진입 방식을 팩이 허용한 것만 쓰게 했다. v4 엔진이 SK이노베이션을 잘 골라놓고
 # COND 로 내서 게이트가 차단했다 — 조건을 감시할 실시간 코드가 0줄이라 집행할 수 없다.
 # 팩에 allowed_entry_types 를 실어 알려준다(ADR 0003 원칙 1: 팩에 없는 것은 AI 에게 없다).
-PROMPT_ID = "decision_v6"
+PROMPT_ID = "decision_v7"
 API_PARAMS: dict[str, Any] = {
     "max_tokens": 16000,
     "output_config": {"effort": "high"},
@@ -256,7 +256,11 @@ def validate(payload: dict, pack_input: dict, arm: int) -> list[str]:
     # ── 물리 검사 ──
     for d in entries:
         u = universe.get(d["code"])
-        close = (u or {}).get("indicators", {}).get("close")
+        # 장중이면 **지금 값**으로 잰다. 전 거래일 종가에 대고 재면 오전에 5% 움직인
+        # 날 정상적인 지정가가 "10% 벌어졌다"로 거부된다. spot 이 없으면 전일 종가다.
+        close = ((u or {}).get("spot") or {}).get("price") or (u or {}).get("indicators", {}).get(
+            "close"
+        )
         entry = d.get("entry") or {}
         price = entry.get("price")
         if close and price and abs(price - close) / close > 0.10:

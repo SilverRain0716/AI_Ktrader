@@ -262,6 +262,40 @@
           },
           "indicators": {
             "$ref": "#/$defs/indicators"
+          },
+          "spot": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "price",
+              "change_pct",
+              "as_of"
+            ],
+            "description": "**지금 이 순간의 값.** `indicators` 는 전 거래일 종가 기준이고 여기만 장중이다. 둘을 한 문장에 섞어 말하지 마라. 장중 시세를 못 받았으면 null 이다.",
+            "properties": {
+              "price": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "change_pct": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "as_of": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "KST ISO8601"
+              }
+            }
           }
         }
       }
@@ -310,7 +344,42 @@
             "description": "업종 대분류. 섹터 집중도 한도는 이 값으로 판정한다. 분류 불명이면 null. 목적은 '같이 움직이는 종목에 몰리지 않는 것'이므로, '기타'가 크면 한도가 무의미해진다."
           },
           "indicators": {
-            "$ref": "#/$defs/indicators"
+            "$ref": "#/$defs/indicators",
+            "description": "**전 거래일 종가 기준이다.** 장중이라도 여기 값은 어제 것이다 — 지금 값은 `spot` 에 있다."
+          },
+          "spot": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "price",
+              "change_pct",
+              "as_of"
+            ],
+            "description": "**지금 이 순간의 값.** `indicators` 는 전 거래일 종가 기준이고 여기만 장중이다. 둘을 한 문장에 섞어 말하지 마라. 장중 시세를 못 받았으면 null 이다.",
+            "properties": {
+              "price": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "change_pct": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "as_of": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "KST ISO8601"
+              }
+            }
           },
           "flows": {
             "$ref": "#/$defs/stockFlows"
