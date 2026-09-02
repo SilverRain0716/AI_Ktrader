@@ -92,6 +92,7 @@ def _buy(**over) -> dict:
         "code": "005930",
         "name": None,
         "weight_pct": 10.0,
+        "rank": 1,
         "entry": {"type": "MARKET", "price": None, "condition": None, "valid_until": None},
         "stop": {"type": "ATR", "value": 2.0},
         "target": None,

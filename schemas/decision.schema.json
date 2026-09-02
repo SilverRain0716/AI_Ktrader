@@ -70,6 +70,7 @@
         "code",
         "name",
         "weight_pct",
+        "rank",
         "entry",
         "stop",
         "target",
@@ -111,6 +112,14 @@
           "minimum": 0,
           "maximum": 100,
           "description": "BUY/ADD: 목표 비중. TRIM: 축소 후 남길 비중. HOLD/EXIT: null"
+        },
+        "rank": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "BUY/ADD: 신규 진입 우선순위. 1 이 가장 먼저이고 겹치지 않는다. HOLD/TRIM/EXIT: null. **개수를 스스로 자르지 말고** 살 만한 것을 전부 내고 순위를 매겨라 — 몇 건을 실제로 집행할지는 기계가 봉투(한도)로 정한다 (ADR 0009)."
         },
         "entry": {
           "type": [

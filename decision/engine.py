@@ -28,7 +28,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from data import config as dcfg
-from decision import contract, providers
+from decision import contract, providers, selection
 
 log = logging.getLogger("decision")
 
@@ -54,7 +54,7 @@ RENDER_VERSION = "r1"
 # v5: 진입 방식을 팩이 허용한 것만 쓰게 했다. v4 엔진이 SK이노베이션을 잘 골라놓고
 # COND 로 내서 게이트가 차단했다 — 조건을 감시할 실시간 코드가 0줄이라 집행할 수 없다.
 # 팩에 allowed_entry_types 를 실어 알려준다(ADR 0003 원칙 1: 팩에 없는 것은 AI 에게 없다).
-PROMPT_ID = "decision_v5"
+PROMPT_ID = "decision_v6"
 API_PARAMS: dict[str, Any] = {
     "max_tokens": 16000,
     "output_config": {"effort": "high"},
@@ -234,9 +234,10 @@ def validate(payload: dict, pack_input: dict, arm: int) -> list[str]:
         if con.get("daily_loss_limit_hit") and entries:
             problems.append(f"일일 손실 한도에 걸렸는데 신규 진입 {len(entries)}건이 있다")
 
-        cap = con.get("max_new_entries_this_cycle")
-        if cap is not None and len(entries) > cap:
-            problems.append(f"신규 진입 {len(entries)}건 > 한도 {cap}건")
+        # **개수로 거부하지 않는다.** 한도를 AI 에게 주면 상한이 아니라 채워야 하는
+        # 칸으로 읽힌다 (2026-09-01 두 arm 모두 정확히 2건). AI 는 살 만한 것을 전부
+        # 순위와 함께 내고, 자르는 것은 selection 이 한다 — ADR 0009 봉투/선택 분리.
+        problems += selection.order_problems(entries)
 
         per_name = con.get("max_weight_pct_per_name")
         for d in entries:
@@ -245,12 +246,11 @@ def validate(payload: dict, pack_input: dict, arm: int) -> list[str]:
                 problems.append(f"{d['code']}: 비중 {w}% > 종목 한도 {per_name}%")
 
         exits = {d["code"] for d in payload.get("decisions", []) if d["action"] == "EXIT"}
-        after = (len(held) - len(exits)) + len([d for d in entries if d["action"] == "BUY"])
-        cap = con.get("max_positions")
-        if cap is not None and after > cap:
-            problems.append(f"결과 보유 {after}종목 > 상한 {cap}종목")
-
-        problems += _sector_problems(entries, held, universe, con)
+        # 봉투 검사는 **실제로 담기는 조합**에 대고 한다. 후보 전체에 대고 하면
+        # 순위 4위 때문에 1위까지 거부되어, 개수 제한을 되살린 것과 같아진다.
+        sel = selection.select(entries, constraints=con, held=held, exits=exits, universe=universe)
+        problems += _sector_problems(list(sel.taken), held, universe, con)
+        # 유동성·종목당 비중은 **후보 하나하나의 성질**이라 담기든 말든 틀린 것은 틀렸다.
         problems += _liquidity_problems(entries, universe, pack_input, con)
 
     # ── 물리 검사 ──
