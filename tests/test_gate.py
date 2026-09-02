@@ -396,3 +396,135 @@ def test_대장에_arm_이_남는다(db, monkeypatch):
     v = gcheck.evaluate(db, _decision(db, "P-a2"), now=NOW, deposit_krw=10**12)
     gcheck.record(db, v, now=NOW)
     assert db.execute("SELECT arm FROM order_intents").fetchone()[0] == 2
+
+
+def test_조건부_진입은_집행하지_않는다(db):
+    """**ADR 0009 가 정해놓고 거부하는 코드가 없었다**(2026-09-02 발견).
+
+    `contract.py` 는 "COND 면 condition 이 있어야 한다"만 보고, 게이트는 `entry.type` 을
+    아예 안 봤다. 어댑터만 붙으면 **감시 못 하는 조건부 주문이 그대로 나간다.**
+
+    **모의계좌라도 막는다** — 위험이 없는 것과 판정할 수 없는 것은 다르다.
+    """
+    import json as _j
+
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('C-a1','live',1,'P','s',1,'premarket',?,?,'r1','ok',?)",
+        (
+            NOW.isoformat(),
+            (NOW + timedelta(hours=5)).isoformat(),
+            _j.dumps(
+                {
+                    "decisions": [
+                        {
+                            "action": "BUY",
+                            "code": "096770",
+                            "name": "SK이노베이션",
+                            "weight_pct": 10,
+                            "entry": {"type": "COND", "condition": "거래대금 평균 회복"},
+                        },
+                        {
+                            "action": "BUY",
+                            "code": "005930",
+                            "name": "삼성전자",
+                            "weight_pct": 5,
+                            "entry": {"type": "MARKET", "price": None},
+                        },
+                    ]
+                }
+            ),
+        ),
+    )
+    v = gcheck.evaluate(db, "C-a1", now=NOW)
+    assert not v.allowed
+    assert any("COND" in b and "블록 G" in b for b in v.blockers)
+    assert [o["code"] for o in v.orders] == ["005930"], "MARKET 은 남아야 한다"
+
+
+def test_허용_목록은_팩이_정본이다(db):
+    """게이트가 따로 상수를 들고 있으면 **팩이 말한 것과 게이트가 막는 것이 갈라진다** —
+    AI 는 팩을 보고 판단했는데 다른 기준으로 차단된다.
+    """
+    import json as _j
+
+    db.execute(
+        "INSERT INTO context_packs (pack_id,cycle,generated_at,universe_size,position_count,"
+        "view_count,warning_count,payload) VALUES ('PK','premarket',?,1,0,0,0,?)",
+        (NOW.isoformat(), _j.dumps({"constraints": {"allowed_entry_types": ["MARKET", "COND"]}})),
+    )
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('K-a1','live',1,'PK','s',1,'premarket',?,?,'r1','ok',?)",
+        (
+            NOW.isoformat(),
+            (NOW + timedelta(hours=5)).isoformat(),
+            _j.dumps(
+                {
+                    "decisions": [
+                        {
+                            "action": "BUY",
+                            "code": "096770",
+                            "name": "x",
+                            "weight_pct": 5,
+                            "entry": {"type": "COND", "condition": "c"},
+                        },
+                        {
+                            "action": "BUY",
+                            "code": "005930",
+                            "name": "y",
+                            "weight_pct": 5,
+                            "entry": {"type": "LIMIT", "price": 100},
+                        },
+                    ]
+                }
+            ),
+        ),
+    )
+    v = gcheck.evaluate(db, "K-a1", now=NOW)
+    # 팩이 COND 를 허용했으므로 통과, LIMIT 은 허용 목록에 없으므로 차단
+    assert [o["code"] for o in v.orders] == ["096770"]
+    assert any("LIMIT" in b for b in v.blockers)
+
+
+def test_팩이_없으면_기본_허용목록을_쓴다(db):
+    """조용히 전부 통과시키지 않는다 — 없으면 코드의 기본값으로 막는다."""
+    import json as _j
+
+    from decision import config as ccfg
+
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('N-a1','live',1,'NOPACK','s',1,'premarket',?,?,'r1','ok',?)",
+        (
+            NOW.isoformat(),
+            (NOW + timedelta(hours=5)).isoformat(),
+            _j.dumps(
+                {
+                    "decisions": [
+                        {
+                            "action": "BUY",
+                            "code": "096770",
+                            "name": "x",
+                            "weight_pct": 5,
+                            "entry": {"type": "COND"},
+                        }
+                    ]
+                }
+            ),
+        ),
+    )
+    assert "COND" not in ccfg.ALLOWED_ENTRY_TYPES
+    assert not gcheck.evaluate(db, "N-a1", now=NOW).allowed
+
+
+def test_팩이_허용_진입방식을_싣는다():
+    """팩에 없는 것은 AI 에게 없다 (ADR 0003 원칙 1)."""
+    import inspect
+
+    from decision import pack as pk
+
+    assert "allowed_entry_types" in inspect.getsource(pk.build)

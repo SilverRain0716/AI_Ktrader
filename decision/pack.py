@@ -553,6 +553,8 @@ def build(
             # 하드코딩된 상수였다. 환경변수로 한도를 정성껏 주입해도 아무 효과가 없었다.
             "daily_loss_limit_hit": blocks["daily_loss_limit_hit"],
             "blocked_codes": blocks["blocked_codes"],
+            # 팩에 없는 것은 AI 에게 없다 (ADR 0003 원칙 1).
+            "allowed_entry_types": list(config.ALLOWED_ENTRY_TYPES),
         },
         "data_quality": dq,
     }
