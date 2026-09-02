@@ -50,6 +50,16 @@ class Reply:
     input_tokens: int
     output_tokens: int
     latency_ms: int
+    # 입력 중 **캐시로 싸게 온 몫**. 제공자가 말해주지 않으면 None 이다 —
+    # 0 으로 두면 "캐시가 하나도 안 먹었다"와 "모른다"가 구분되지 않는다.
+    cached_input_tokens: int | None = None
+
+    @property
+    def cache_hit_pct(self) -> float | None:
+        """입력의 몇 %가 캐시였는가. 모르면 None."""
+        if self.cached_input_tokens is None or not self.input_tokens:
+            return None
+        return round(self.cached_input_tokens / self.input_tokens * 100, 1)
 
 
 class Provider(Protocol):
@@ -107,6 +117,7 @@ class AnthropicProvider:
             input_tokens=r.usage.input_tokens,
             output_tokens=r.usage.output_tokens,
             latency_ms=int((time.monotonic() - t0) * 1000),
+            cached_input_tokens=getattr(r.usage, "cache_read_input_tokens", None),
         )
 
 
@@ -174,7 +185,19 @@ class OpenAIProvider:
             input_tokens=getattr(r.usage, "input_tokens", 0),
             output_tokens=getattr(r.usage, "output_tokens", 0),
             latency_ms=int((time.monotonic() - t0) * 1000),
+            cached_input_tokens=_openai_cached(r),
         )
+
+
+def _openai_cached(r) -> int | None:
+    """`usage.input_tokens_details.cached_tokens`. **없으면 0 이 아니라 None.**
+
+    OpenAI 는 캐시된 몫을 `input_tokens` 에 **포함해서** 보고한다(Anthropic 과 반대).
+    그래서 여기 숫자는 input_tokens 의 부분집합이고, 비율 계산이 그대로 성립한다.
+    """
+    d = getattr(getattr(r, "usage", None), "input_tokens_details", None)
+    v = getattr(d, "cached_tokens", None) if d is not None else None
+    return int(v) if isinstance(v, int) else None
 
 
 def _openai_text(r) -> str:

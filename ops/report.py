@@ -164,6 +164,27 @@ def report(conn: sqlite3.Connection, day: date) -> int:
             log.warning("   깨짐 %s — %s", x.code, x.reason)
         problems += len(hit)
 
+    # ── 6. 비용
+    from ops import cost as cst
+
+    for u in cst.total(conn, since=d):
+        usd = u.usd()
+        hit = u.cache_hit_pct
+        log.info(
+            "── 비용 %s · 호출 %d · 입력 %s · 출력 %s · %s",
+            u.model,
+            u.calls,
+            f"{u.input_tokens:,}",
+            f"{u.output_tokens:,}",
+            f"${usd:.3f}" if usd is not None else "단가 모름 — 금액 없음",
+        )
+        if hit is None:
+            # **0 이 아니라 모른다.** 재지 못한 것을 "캐시 안 먹음"으로 보고하면
+            # 없는 개선 여지를 만들어낸다.
+            log.warning("   캐시 적중률을 재지 못했다 — 제공자가 값을 주지 않았다")
+        else:
+            log.info("   캐시 적중 %.1f%% (%s 토큰)", hit, f"{u.cached_tokens:,}")
+
     log.info("═══ %s ═══", "볼 것 없음" if problems == 0 else f"확인할 것 {problems}건")
     return 0 if problems == 0 else 1
 
