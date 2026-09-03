@@ -547,3 +547,19 @@ def test_sync_는_코드_매핑까지_한다(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "task_map_codes", lambda *a, **k: calls.append("map"))
     pipeline.main(["sync"])
     assert calls == ["sync", "reparse", "map"]
+
+
+def test_일일_배치도_같은_순서를_돈다(monkeypatch):
+    """**호출 지점 하나만 고치면 절반만 고친 것이다.** CLI 는 매핑까지 하는데
+    `data.pipeline daily` 는 `task_sync` 만 불러서 코드가 안 채워졌다 —
+    고친 다음 날 손으로 쳤더니 7건이 잡혔다 (2026-09-04).
+    """
+    from briefing import pipeline
+    from data import pipeline as dp
+
+    calls: list[str] = []
+    monkeypatch.setattr(pipeline, "task_sync", lambda *a, **k: calls.append("sync"))
+    monkeypatch.setattr(pipeline, "task_reparse", lambda *a, **k: calls.append("reparse"))
+    monkeypatch.setattr(pipeline, "task_map_codes", lambda *a, **k: calls.append("map"))
+    dp.task_briefings(None, days=3)
+    assert calls == ["sync", "reparse", "map"]
