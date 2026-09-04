@@ -179,6 +179,15 @@ def test_그날_봉이_없으면_폐기다(db):
 
 
 def test_체결된_것만_포지션에_반영한다(db):
+    # arm 은 **주문 대장이 정본**이라 대장에 행이 있어야 반영된다
+    _decision_row(db, "D2", "2026-08-31T09:00:00+09:00")
+    for iid, code in (("i1", "000880"), ("i2", "004370"), ("i3", "005930")):
+        db.execute(
+            "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+            "created_at,status,arm) VALUES (?,'D2',?,'BUY','paper','mock',"
+            "'2026-08-31T09:00:00+09:00','sent',1)",
+            (iid, code),
+        )
     fills = [
         gb.Fill("i1", "000880", gb.FILLED, 8, 135_500),
         gb.Fill("i2", "004370", gb.GAPPED, 2, 0),
@@ -309,3 +318,35 @@ def test_접수_전_주문도_이월되지_않는다(db):
     # 이미 체결된 것은 되돌릴 수 없다 — 폐기 대상이 아니다
     assert got["i-filled"] == "filled"
     assert len(out) == 2
+
+
+def test_체결은_주문을_낸_arm_계좌로_간다(db, monkeypatch):
+    """**분리해 놓고 마지막 단계에서 합쳐버리면 F2·F3 를 잴 수 없다.**
+
+    `settle` 은 여러 arm 의 미체결을 한 번에 처리하므로 arm 을 인자로 고를 수 없다.
+    실제로 기본값 1 이 그대로 쓰여 arm 2 의 체결이 arm 1 계좌에 들어갔다
+    (2026-09-04, 우리금융지주·한화생명).
+    """
+    _decision_row(db, "D-a2", "2026-09-04T08:27:00+09:00")
+    for iid, code, arm in (("i1", "316140", 2), ("i2", "005930", 1)):
+        db.execute(
+            "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+            "created_at,status,arm) VALUES (?,'D-a2',?,'BUY','paper','mock',"
+            "'2026-09-04T08:27:00+09:00','sent',?)",
+            (iid, code, arm),
+        )
+    fills = [
+        gb.Fill("i1", "316140", gb.FILLED, qty=86, price=34650),
+        gb.Fill("i2", "005930", gb.FILLED, qty=10, price=70000),
+    ]
+    assert gb.apply_fills(db, fills, day="2026-09-04") == 2
+
+    got = dict(db.execute("SELECT code,arm FROM paper_positions").fetchall())
+    assert got == {"316140": 2, "005930": 1}
+
+
+def test_대장에_없는_체결은_아무_계좌에도_넣지_않는다(db):
+    """어느 계좌 것인지 모르는 체결을 1번에 밀어넣으면 **그 계좌의 수익률이 조용히 오염된다.**"""
+    fills = [gb.Fill("없는주문", "316140", gb.FILLED, qty=10, price=1000)]
+    assert gb.apply_fills(db, fills, day="2026-09-04") == 0
+    assert db.execute("SELECT COUNT(*) FROM paper_positions").fetchone()[0] == 0

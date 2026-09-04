@@ -263,12 +263,17 @@ def supersede(conn: sqlite3.Connection, decision_id: str) -> list[Fill]:
     return out
 
 
-def apply_fills(
-    conn: sqlite3.Connection, fills: list[Fill], *, day: date | str, arm: int = 1
-) -> int:
+def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str) -> int:
     """체결된 것만 `paper_positions` 에 반영한다. **주문 대장이 정본이고 여기는 파생이다.**
 
     `arm` 마다 독립된 가상 계좌다 — 섞으면 3-arm 대응비교가 무너진다.
+
+    **arm 은 인자로 받지 않는다.** 예전에는 `arm: int = 1` 이었는데, `settle` 은 여러 arm 의
+    미체결을 **한 번에** 처리하므로 하나를 고를 수 없다. 실제로 기본값이 그대로 쓰여
+    arm 2 의 체결이 arm 1 계좌에 들어갔다(2026-09-04, 우리금융지주·한화생명).
+    **분리해 놓고 마지막 단계에서 합쳐버린 것**이라 F2·F3 를 잴 수 없게 된다.
+
+    각 체결의 arm 은 그 주문을 낸 `order_intents` 행이 정본이다.
     """
     from decision import positions as P
 
@@ -277,6 +282,15 @@ def apply_fills(
     for f in fills:
         if f.status != FILLED or f.qty <= 0:
             continue
+        row = conn.execute(
+            "SELECT arm FROM order_intents WHERE intent_id=?", (f.intent_id,)
+        ).fetchone()
+        if row is None:
+            # **아무 arm 에나 넣지 않는다.** 어느 계좌 것인지 모르는 체결을 1번에
+            # 밀어넣으면 그 계좌의 수익률이 조용히 오염된다.
+            log.error("%s: 주문 대장에 없는 체결이라 arm 을 알 수 없다 — 반영하지 않는다", f.code)
+            continue
+        arm = row[0]
         name = conn.execute("SELECT name FROM listing WHERE code=? LIMIT 1", (f.code,)).fetchone()
         P.open_position(
             conn,
