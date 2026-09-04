@@ -49,6 +49,9 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `scripts/` 는 배포 패키지가 아니라(위 packages 참고) 설치 경로로 임포트되지 않는다.
+# 그런데 거기 계산이 프롬프트가 인용하는 숫자를 만들므로 테스트가 볼 수 있어야 한다.
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = ["net: 외부 네트워크를 타는 테스트 (기본 제외: -m 'not net')"]
 addopts = "-m 'not net'"
