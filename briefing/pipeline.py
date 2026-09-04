@@ -116,6 +116,21 @@ def task_sync(conn, *, days: int | None, full: bool) -> None:
             log.info("   %3d회  %s", n, msg)
 
 
+def sync_all(conn, *, days: int = 5, full: bool = False) -> None:
+    """받고 → 다시 파싱하고 → 코드를 채운다. **부르는 곳이 둘 이상이면 함수여야 한다.**
+
+    처음에는 이 순서를 `main()` 안에 늘어놓았다. 그래서 CLI 로 부를 때만 코드가 채워지고
+    **일일 배치(`data.pipeline daily` → `task_briefings`)는 `task_sync` 만 불러서
+    매핑이 빠졌다** — 고친 다음 날 손으로 `map-codes` 를 쳤더니 7건이 잡혔다(2026-09-04).
+    호출 지점 하나만 고친 것이었다.
+    """
+    task_sync(conn, days=days, full=full)
+    task_reparse(conn)
+    # **파싱만 하고 끝내면 관점이 유니버스에 닿지 않는다.** 코드 없는 관점은
+    # universe._briefing_channel 의 `v.code IS NOT NULL` 에서 조용히 빠진다.
+    task_map_codes(conn)
+
+
 def task_map_codes(conn) -> None:
     """종목명만 있는 관점에 6자리 코드를 채운다 (kr-preclose 는 원문에 코드가 없다)."""
     started = _now()
@@ -344,12 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     with store.connect() as conn:
         store.init_db(conn)
         if args.task == "sync":
-            task_sync(conn, days=args.days, full=args.full)
-            task_reparse(conn)
-            # **파싱만 하고 끝내면 관점이 유니버스에 닿지 않는다.** 코드 없는 관점은
-            # universe._briefing_channel 의 `v.code IS NOT NULL` 에서 조용히 빠진다.
-            # map-codes 를 별도 명령으로만 두었더니 한 번도 실행되지 않았다 (~2026-09-02).
-            task_map_codes(conn)
+            sync_all(conn, days=args.days, full=args.full)
         elif args.task == "map-codes":
             task_map_codes(conn)
         elif args.task == "reparse":

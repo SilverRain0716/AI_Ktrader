@@ -528,7 +528,7 @@ def task_briefings(conn, *, days: int = 5) -> None:
     from briefing import pipeline as bp
 
     try:
-        bp.task_sync(conn, days=days, full=False)
+        bp.sync_all(conn, days=days, full=False)
     except Exception as e:
         log.error("브리핑 동기화 실패 — %s: %s", type(e).__name__, e)
         log.error(

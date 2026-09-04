@@ -41,6 +41,9 @@ log = logging.getLogger("gate.broker")
 SENT, FILLED, EXPIRED, GAPPED = "sent", "filled", "expired", "gapped"
 # 새 사이클의 판단이 나와 옛 주문이 무효가 된 상태. **이월 금지**(ADR 0009 결정 3).
 SUPERSEDED = "superseded"
+# 아직 나가지 않은 주문. `sent` 만 폐기하면 **판정만 되고 접수 안 된 것이 영원히 남는다** —
+# 2026-09-02 의 `allowed` 4건이 이틀 뒤에도 그대로였다. 나갈 수 있는 것은 전부 무효화한다.
+STALE = (SENT, "allowed")
 
 
 @dataclass(frozen=True)
@@ -230,6 +233,10 @@ def supersede(conn: sqlite3.Connection, decision_id: str) -> list[Fill]:
     실제로 그 구멍이 있었다(2026-09-01): v3 가 접수한 2건이 남아 있는데 v4 가
     양쪽 arm 모두 abstain 했고, 그대로 두면 **최신 판단과 어긋난 주문이 체결된다.**
 
+    **`allowed` 도 폐기한다.** 처음에는 `sent` 만 봤는데, 그러면 판정만 되고 접수되지
+    않은 주문이 영원히 남는다 — 2026-09-02 의 `allowed` 4건이 이틀 뒤 사이클에서도
+    그대로였다. 나중에 누가 `place` 를 치면 **사흘 전 판단으로 주문이 나간다.**
+
     같은 결정에서 나온 주문은 건드리지 않는다 — 재시도가 자기 주문을 지우면 안 된다.
     """
     row = conn.execute(
@@ -238,12 +245,13 @@ def supersede(conn: sqlite3.Connection, decision_id: str) -> list[Fill]:
     ).fetchone()
     if row is None:
         return []
+    marks = ",".join("?" * len(STALE))
     stale = conn.execute(
         "SELECT i.intent_id, i.code FROM order_intents i "
         "JOIN (SELECT decision_id, MAX(generated_at) g FROM decisions GROUP BY decision_id) d "
         "  ON d.decision_id = i.decision_id "
-        "WHERE i.status = ? AND i.decision_id <> ? AND d.g < ?",
-        (SENT, decision_id, row[0]),
+        f"WHERE i.status IN ({marks}) AND i.decision_id <> ? AND d.g < ?",
+        (*STALE, decision_id, row[0]),
     ).fetchall()
     out = []
     for intent_id, code in stale:

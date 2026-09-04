@@ -255,7 +255,9 @@ def test_더_나중_결정의_주문은_건드리지_않는다(db):
     assert db.execute("SELECT status FROM order_intents").fetchone()[0] == "sent"
 
 
-@pytest.mark.parametrize("status", ["filled", "expired", "gapped", "allowed"])
+# `allowed` 는 여기 없다. **끝난 것이 아니라 아직 시작 안 한 것**이다 —
+# 처음에 같은 목록에 넣었더니 접수 전 주문이 사흘째 살아 있었다 (2026-09-04).
+@pytest.mark.parametrize("status", ["filled", "expired", "gapped"])
 def test_이미_끝난_것은_폐기하지_않는다(db, status):
     _decision_row(db, "OLD", "2026-09-01T10:35:00+09:00")
     _decision_row(db, "NEW", "2026-09-01T10:56:00+09:00")
@@ -279,3 +281,31 @@ def test_abstain_결정으로_place_를_불러도_옛_주문이_폐기된다(db,
     rc = gp.task_place(db, "NEW", latest=False)
     assert rc == 0
     assert db.execute("SELECT status FROM order_intents").fetchone()[0] == gb.SUPERSEDED
+
+
+def test_접수_전_주문도_이월되지_않는다(db):
+    """`sent` 만 폐기하면 **판정만 되고 접수 안 된 것이 영원히 남는다** —
+    2026-09-02 의 `allowed` 4건이 이틀 뒤에도 그대로였다.
+    나중에 누가 place 를 치면 사흘 전 판단으로 주문이 나간다.
+    """
+    _decision_row(db, "OLD", "2026-09-02T08:40:00+09:00")
+    _decision_row(db, "NEW", "2026-09-04T08:24:00+09:00", status="abstain")
+    for iid, code, status in (
+        ("i-allowed", "005930", "allowed"),
+        ("i-sent", "000660", "sent"),
+        ("i-filled", "035720", "filled"),
+    ):
+        db.execute(
+            "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+            "created_at,status) VALUES (?,'OLD',?,'BUY','paper','mock',"
+            "'2026-09-02T08:41:00+09:00',?)",
+            (iid, code, status),
+        )
+
+    out = gb.supersede(db, "NEW")
+    got = dict(db.execute("SELECT intent_id,status FROM order_intents").fetchall())
+    assert got["i-allowed"] == gb.SUPERSEDED
+    assert got["i-sent"] == gb.SUPERSEDED
+    # 이미 체결된 것은 되돌릴 수 없다 — 폐기 대상이 아니다
+    assert got["i-filled"] == "filled"
+    assert len(out) == 2
