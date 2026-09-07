@@ -132,14 +132,9 @@ def task_place(conn, decision_id: str | None, latest: bool) -> int:
         log.warning("  폐기 %s — %s", f.code, f.reason)
     conn.commit()
 
-    st = conn.execute(
-        "SELECT status FROM decisions WHERE decision_id=? ORDER BY attempt DESC LIMIT 1",
-        (decision_id,),
-    ).fetchone()
-    if st and st[0] == "abstain":
-        log.info("%s 은 abstain 이다 — 신규 접수 없음. 옛 미체결만 폐기했다", decision_id)
-        return 0
-
+    # **`abstain` 에서 조기 종료하지 않는다.** 신규 진입을 거르는 것은 게이트가 하고,
+    # 여기서 통째로 빠져나가면 같은 판단에 실린 EXIT·TRIM 이 함께 사라진다.
+    # 세 자리에 같은 실수가 있었다 — check·place·그리고 게이트의 status 검사(2026-09-07).
     v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed(gcfg.arm_of(decision_id)))
     for n in v.notes:
         log.info("알림: %s", n)
@@ -158,6 +153,37 @@ def task_place(conn, decision_id: str | None, latest: bool) -> int:
             log.warning("  %s %s — %s", f.status, f.code, f.reason)
     conn.commit()
     return 0
+
+
+def task_protect(conn, *, apply: bool) -> int:
+    """봉투를 벗어난 포지션을 강제 청산 대상으로 올린다. **기본은 읽기만 한다.**
+
+    `--apply` 여야 결정 행을 남긴다. 그 뒤 `place` 가 주문을 낸다 — 여기서 바로
+    주문을 내면 킬 스위치·모드·멱등성 검사를 건너뛰게 된다.
+    """
+    from gate import protect as pr
+
+    day = conn.execute("SELECT MAX(date) FROM ohlcv WHERE volume > 0").fetchone()[0]
+    if not day:
+        log.error("일봉이 없다 — 먼저 데이터 배치를 돌린다")
+        return 1
+
+    breaches = pr.scan(conn, day)
+    if not breaches:
+        log.info("기준일 %s · 봉투를 벗어난 포지션이 없다", day)
+        return 0
+
+    for b in breaches:
+        log.warning("  [%s] %s %s — %s", b.kind, b.code, b.name, b.reason)
+    if not apply:
+        log.info("읽기만 했다 — 강제 청산하려면 --apply (그 뒤 place)")
+        return 1
+
+    n = pr.enforce(conn, breaches, day=day)
+    conn.commit()
+    ids = sorted({pr.decision_id(day, b.arm) for b in breaches})
+    log.info("강제 청산 결정 %d건 기록 — 주문은 아직 아니다. 다음: %s", n, ", ".join(ids))
+    return 1
 
 
 def task_settle(conn, day: str | None) -> int:
@@ -306,7 +332,10 @@ def task_positions(conn) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="gate.pipeline", description="집행 게이트 (주문 없음)")
-    p.add_argument("task", choices=["status", "check", "place", "settle", "fills", "positions"])
+    p.add_argument(
+        "task",
+        choices=["status", "check", "place", "settle", "fills", "positions", "protect"],
+    )
     p.add_argument("--decision", default=None)
     p.add_argument("--latest", action="store_true", help="가장 최근 집행 대상 결정")
     p.add_argument("--record", action="store_true", help="판정을 order_intents 에 남긴다")
@@ -314,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--apply",
         action="store_true",
-        help="fills: 조회한 체결로 대장을 갱신한다. 주지 않으면 읽기만 한다",
+        help="fills·protect: 실제로 반영한다. 주지 않으면 읽기만 한다",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
@@ -334,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
             return task_settle(conn, args.day)
         if args.task == "fills":
             return task_fills(conn, apply=args.apply)
+        if args.task == "protect":
+            return task_protect(conn, apply=args.apply)
         return task_positions(conn)
 
 

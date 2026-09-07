@@ -18,6 +18,7 @@ import pytest
 
 from data import config as dcfg
 from data import store
+from decision import config as ccfg
 from gate import broker as gb
 
 NOW = datetime(2026, 9, 1, 4, 56, 45, tzinfo=dcfg.KST)  # KST 새벽 — UTC 로는 전날이다
@@ -215,12 +216,17 @@ def test_시뮬레이터는_아무_데도_요청하지_않는다():
 # ── 6. 이월 금지 (ADR 0009 결정 3) ──────────────────────
 
 
-def _decision_row(conn, did, at, status="ok"):
+def _decision_row(conn, did, at, status="ok", valid=None):
+    """`valid` 를 주지 않으면 `at` 이 곧 만료다 — 대부분의 테스트는 만료를 안 본다.
+
+    `task_place` 처럼 **실제 시계로** 만료를 재는 경로에서는 미래 시각을 준다.
+    고정 시각을 쓰면 그 테스트는 언젠가 조용히 만료로 실패한다.
+    """
     conn.execute(
         "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
         "generated_at,valid_until,render_version,status,payload) "
         "VALUES (?,'live',1,'P','s',1,'premarket',?,?,'r1',?,'{}')",
-        (did, at, at, status),
+        (did, at, valid or at, status),
     )
 
 
@@ -284,10 +290,16 @@ def test_abstain_결정으로_place_를_불러도_옛_주문이_폐기된다(db,
     from gate import pipeline as gp
 
     _decision_row(db, "OLD", "2026-09-01T10:35:00+09:00")
-    _decision_row(db, "NEW", "2026-09-01T10:56:00+09:00", status="abstain")
+    _decision_row(
+        db,
+        "NEW-a1",
+        "2026-09-01T10:56:00+09:00",
+        status="abstain",
+        valid="2099-01-01T00:00:00+09:00",
+    )
     _sent(db, "i1", "OLD", "009150")
 
-    rc = gp.task_place(db, "NEW", latest=False)
+    rc = gp.task_place(db, "NEW-a1", latest=False)
     assert rc == 0
     assert db.execute("SELECT status FROM order_intents").fetchone()[0] == gb.SUPERSEDED
 
@@ -464,3 +476,183 @@ def test_결정을_못_찾아도_포지션은_연다(db):
     )
     got = db.execute("SELECT qty,invalidation FROM paper_positions").fetchone()
     assert got == (86, None)
+
+
+# ── 매도 집행 ───────────────────────────────────────────
+
+
+def _pos(db, code, qty, avg, *, arm=2, pid=None):
+    from decision import positions as P
+
+    P.open_position(
+        conn=db,
+        position_id=pid or f"p-{code}",
+        arm=arm,
+        code=code,
+        name=code,
+        qty=qty,
+        avg_price=avg,
+        opened_at="2026-09-04",
+    )
+
+
+def _sell_intent(db, iid, did, code, action, weight, *, arm=2):
+    db.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+        "created_at,status,arm) VALUES (?,?,?,?,'paper','mock','2026-09-07T10:00:00+09:00',"
+        "'allowed',?)",
+        (iid, did, code, action, arm),
+    )
+
+
+def _sell_decision(db, did, decisions):
+    import json as _j
+
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES (?,'live',1,'P','s',2,'midday','2026-09-07T10:00:00+09:00',"
+        "'2026-09-07T15:20:00+09:00','r1','abstain',?)",
+        (did, _j.dumps({"decisions": decisions})),
+    )
+
+
+def test_EXIT_은_보유_전량이다(db):
+    """**목표비중으로 재면 EXIT 은 weight_pct 가 null 이라 항상 수량 0 이 된다** —
+    AI 가 아무리 나가라고 해도 주문이 안 나갔다 (2026-09-07).
+    """
+    _pos(db, "088350", 327, 6110)
+    _sell_decision(db, "S-a2", [{"action": "EXIT", "code": "088350", "weight_pct": None}])
+    _sell_intent(db, "s1", "S-a2", "088350", "EXIT", None)
+    _bar(db, "088350", "2026-08-31", 6100, 6150, 6050, 6110)
+
+    (f,) = gb.SimBroker().place(db, "S-a2", now=NOW)
+    assert (f.status, f.qty) == (gb.SENT, 327)
+
+
+def test_TRIM_은_줄이는_만큼이다(db):
+    """`weight_pct` 는 **축소 후 남길 비중**이다. 그만큼 '사는' 수량을 내면 방향이 반대다."""
+    equity = ccfg.account_seed()["total_equity_krw"]
+    keep = gb.size_for(equity, 7, 33200)  # 축소 후 남길 수량
+    held = keep * 2  # 목표의 두 배를 들고 있다 = 절반을 판다
+    _pos(db, "316140", held, 34650)
+    _sell_decision(db, "T-a2", [{"action": "TRIM", "code": "316140", "weight_pct": 7}])
+    _sell_intent(db, "t1", "T-a2", "316140", "TRIM", 7)
+    _bar(db, "316140", "2026-08-31", 33100, 33400, 33000, 33200)
+
+    (f,) = gb.SimBroker().place(db, "T-a2", now=NOW)
+    assert f.qty == held - keep
+    assert 0 < f.qty < held
+
+
+def test_보유가_없으면_팔_것이_없다(db):
+    _sell_decision(db, "N-a2", [{"action": "EXIT", "code": "088350", "weight_pct": None}])
+    _sell_intent(db, "n1", "N-a2", "088350", "EXIT", None)
+    (f,) = gb.SimBroker().place(db, "N-a2", now=NOW)
+    assert f.status == gb.EXPIRED and "보유가 없다" in f.reason
+
+
+def test_매도에는_갭_가드를_걸지_않는다(db):
+    """**갭 하락한 날이 나가야 할 날이다.** 진입 가드를 매도에 걸면 못 나온다 —
+    환경변수 이름부터 `MAX_ENTRY_GAP_*` 이다.
+    """
+    _pos(db, "088350", 327, 6110)
+    db.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+        "created_at,status,qty,arm) VALUES ('s2','S2','088350','EXIT','paper','mock',"
+        "'2026-09-06T10:00:00+09:00','sent',327,2)"
+    )
+    _bar(db, "088350", "2026-09-04", 6100, 6150, 6050, 6110)
+    _bar(db, "088350", "2026-09-07", 5000, 5100, 4900, 5000)  # -18% 갭
+    # **ATR 이 없으면 갭 가드 자체가 안 돌아 되돌림 시험이 무의미해진다.**
+    db.execute(
+        "INSERT INTO indicators (code,date,payload) VALUES ('088350','2026-09-04',?)",
+        (json.dumps({"indicators": {"atr_pct": 2.0}}),),
+    )
+    # 매수였다면 -18% / 2.0 = -9 ATR 로 확실히 걸린다
+    assert abs((5000 - 6110) / 6110 * 100 / 2.0) > 1
+
+    fills = gb.SimBroker().settle(db, "2026-09-07")
+    assert [f.status for f in fills] == [gb.FILLED]
+    assert fills[0].price == 5000
+
+
+def test_매도_지정가는_고가로_판정한다(db):
+    """사는 지정가는 저가가 내려와야 붙고, **파는 지정가는 고가가 올라와야** 붙는다."""
+    _pos(db, "088350", 100, 6000)
+    for iid, did, limit in (("m1", "S3a", 5900), ("m2", "S3b", 6300)):
+        db.execute(
+            "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+            "created_at,status,qty,limit_price,arm) VALUES (?,?,'088350','EXIT','paper',"
+            "'mock','2026-09-06T10:00:00+09:00','sent',100,?,2)",
+            (iid, did, limit),
+        )
+    _bar(db, "088350", "2026-09-04", 6100, 6150, 6050, 6110)
+    _bar(db, "088350", "2026-09-07", 5950, 6100, 5800, 6000)
+
+    got = {f.intent_id: f.status for f in gb.SimBroker().settle(db, "2026-09-07")}
+    assert got["m1"] == gb.FILLED  # 고가 6,100 ≥ 5,900
+    assert got["m2"] == gb.EXPIRED  # 고가 6,100 < 6,300
+
+
+def test_EXIT_체결은_포지션을_닫는다(db):
+    _pos(db, "088350", 327, 6110)
+    _sell_intent(db, "x1", "X", "088350", "EXIT", None)
+    db.execute("UPDATE order_intents SET status='filled' WHERE intent_id='x1'")
+    assert (
+        gb.apply_fills(db, [gb.Fill("x1", "088350", gb.FILLED, 327, 5740)], day="2026-09-07") == 1
+    )
+
+    r = db.execute(
+        "SELECT closed_at, exit_price, realized_pnl_krw FROM paper_positions WHERE code='088350'"
+    ).fetchone()
+    assert r[0] == "2026-09-07"
+    assert r[1] == 5740
+    assert r[2] < 0  # 6,110 → 5,740
+
+
+def test_TRIM_체결은_수량만_줄인다(db):
+    _pos(db, "316140", 86, 34650)
+    _sell_intent(db, "x2", "X", "316140", "TRIM", 7)
+    assert (
+        gb.apply_fills(db, [gb.Fill("x2", "316140", gb.FILLED, 46, 33550)], day="2026-09-07") == 1
+    )
+
+    r = db.execute(
+        "SELECT qty, closed_at, realized_pnl_krw FROM paper_positions WHERE code='316140'"
+    ).fetchone()
+    assert r[0] == 40  # 86 - 46
+    assert r[1] is None, "일부만 팔았는데 포지션이 닫혔다"
+    assert r[2] < 0
+
+
+def test_보유_없는_매도_체결은_반영하지_않는다(db):
+    """**없는 포지션을 만들어내지 않는다.** 대장과 계좌가 어긋난 것이고 드러나야 한다."""
+    _sell_intent(db, "x3", "X", "088350", "EXIT", None)
+    assert gb.apply_fills(db, [gb.Fill("x3", "088350", gb.FILLED, 10, 5000)], day="2026-09-07") == 0
+    assert db.execute("SELECT COUNT(*) FROM paper_positions").fetchone()[0] == 0
+
+
+def test_전량만큼_축소하면_전량_청산과_같다(db):
+    """두 경로가 손익을 각자 계산하면 같은 거래가 다른 숫자를 낸다."""
+    from decision import positions as P
+
+    _pos(db, "A", 10, 1000, pid="pa")
+    _pos(db, "B", 10, 1000, pid="pb")
+    P.close_position(db, "pa", closed_at="2026-09-07", exit_price=900, exit_reason="EXIT")
+    P.reduce_position(db, "pb", qty=10, at="2026-09-07", exit_price=900, exit_reason="TRIM")
+    got = [r[0] for r in db.execute("SELECT realized_pnl_krw FROM paper_positions ORDER BY code")]
+    assert got[0] == got[1]
+
+
+def test_두_번_줄이면_손익이_누적된다(db):
+    """덮어쓰면 **첫 번째 축소가 없던 일이 된다.**"""
+    from decision import positions as P
+
+    _pos(db, "A", 10, 1000, pid="pa")
+    P.reduce_position(db, "pa", qty=3, at="2026-09-07", exit_price=900, exit_reason="TRIM")
+    first = db.execute("SELECT realized_pnl_krw FROM paper_positions").fetchone()[0]
+    P.reduce_position(db, "pa", qty=3, at="2026-09-08", exit_price=900, exit_reason="TRIM")
+    second = db.execute("SELECT realized_pnl_krw FROM paper_positions").fetchone()[0]
+    assert second < first < 0
+    assert second == pytest.approx(first * 2, rel=0.01)

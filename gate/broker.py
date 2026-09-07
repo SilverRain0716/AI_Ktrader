@@ -45,6 +45,11 @@ SUPERSEDED = "superseded"
 # 2026-09-02 의 `allowed` 4건이 이틀 뒤에도 그대로였다. 나갈 수 있는 것은 전부 무효화한다.
 STALE = (SENT, "allowed")
 
+# 파는 지시. **수량이 목표비중이 아니라 보유분에서 나온다** — 이 구분이 없으면
+# EXIT 은 weight_pct 가 null 이라 "수량 0" 으로 폐기되고, TRIM 은 목표비중만큼
+# **사는** 수량을 낸다(방향이 반대). 2026-09-07 에 둘 다 실제로 그랬다.
+SELL_ACTIONS = ("EXIT", "TRIM")
+
 
 @dataclass(frozen=True)
 class Fill:
@@ -126,13 +131,24 @@ class SimBroker:
             d["code"]: d.get("weight_pct") or 0
             for d in (json.loads(pay[0]).get("decisions") or [] if pay and pay[0] else [])
         }
-        for intent_id, code, _action, limit_price in rows:
+        arms = dict(
+            conn.execute(
+                "SELECT code, arm FROM order_intents WHERE decision_id=?", (decision_id,)
+            ).fetchall()
+        )
+        for intent_id, code, action, limit_price in rows:
             ref = limit_price or (_prev_close(conn, code, day) or 0)
-            qty = size_for(equity, weights.get(code, 0), ref)
-            if qty == 0:
-                f = Fill(
-                    intent_id, code, EXPIRED, 0, 0, f"수량 0 — 1주({ref:,}원)가 목표 비중을 넘는다"
+            if action in SELL_ACTIONS:
+                qty, why = _sell_qty(
+                    conn, code, arms.get(code, 1), action, weights.get(code), ref, equity
                 )
+            else:
+                qty, why = (
+                    size_for(equity, weights.get(code, 0), ref),
+                    (f"수량 0 — 1주({ref:,}원)가 목표 비중을 넘는다"),
+                )
+            if qty == 0:
+                f = Fill(intent_id, code, EXPIRED, 0, 0, why)
                 conn.execute(
                     "UPDATE order_intents SET status=?, reason=?, qty=0 WHERE intent_id=?",
                     (EXPIRED, f.reason, intent_id),
@@ -162,7 +178,7 @@ class SimBroker:
         # **주문일보다 이전 봉으로 체결시키지 않는다.** 결정이 이미 본 봉으로 체결하면
         # 그 판단의 근거가 곧 체결가가 된다 — 이 저장소가 반복해 당한 미래/과거 누수다.
         # 실제로 그랬다(2026-09-01): 09-01 장을 향한 주문이 08-31 봉으로 체결됐다.
-        for intent_id, code, _action, qty, limit_price in conn.execute(
+        for intent_id, code, action, qty, limit_price in conn.execute(
             "SELECT intent_id, code, action, qty, limit_price FROM order_intents "
             "WHERE status='sent' AND substr(created_at, 1, 10) <= ?",
             (day,),
@@ -175,9 +191,13 @@ class SimBroker:
                     )
                 )
                 continue
-            o, _h, low, _c = bar
+            o, high, low, _c = bar
+            selling = action in SELL_ACTIONS
             prev, atr = _prev_close(conn, code, day), _atr_pct(conn, code, day)
-            if prev and atr:
+            # **갭 가드는 진입용이다.** 환경변수 이름부터 `MAX_ENTRY_GAP_*` 이고, ADR 0009
+            # 의 취지는 "밤새 시장이 움직였으면 그 *진입* 전제가 깨졌다" 이다.
+            # 나가는 데 걸면 정반대가 된다 — **갭 하락한 날이 나가야 할 날인데 못 나온다.**
+            if prev and atr and not selling:
                 gap_atr = (o - prev) / prev * 100 / atr
                 if gap_atr > up or gap_atr < -down:
                     out.append(
@@ -191,14 +211,19 @@ class SimBroker:
                     )
                     continue
             if limit_price:
-                if low > limit_price:
+                # **매도 지정가는 방향이 뒤집힌다.** 사는 지정가는 저가가 내려와야 붙고,
+                # 파는 지정가는 **고가가 올라와야** 붙는다. 같은 식을 쓰면 매도가
+                # 거의 항상 체결되거나(저가 조건) 거의 항상 폐기된다.
+                reached = high >= limit_price if selling else low <= limit_price
+                if not reached:
+                    seen = f"고가 {high:,}" if selling else f"저가 {low:,}"
                     out.append(
                         self._close(
                             conn,
                             intent_id,
                             code,
                             EXPIRED,
-                            reason=f"지정가 {limit_price:,} 미도달 (저가 {low:,})",
+                            reason=f"지정가 {limit_price:,} 미도달 ({seen})",
                         )
                     )
                     continue
@@ -294,14 +319,18 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
         if f.status != FILLED or f.qty <= 0:
             continue
         row = conn.execute(
-            "SELECT arm, decision_id FROM order_intents WHERE intent_id=?", (f.intent_id,)
+            "SELECT arm, decision_id, action FROM order_intents WHERE intent_id=?",
+            (f.intent_id,),
         ).fetchone()
         if row is None:
             # **아무 arm 에나 넣지 않는다.** 어느 계좌 것인지 모르는 체결을 1번에
             # 밀어넣으면 그 계좌의 수익률이 조용히 오염된다.
             log.error("%s: 주문 대장에 없는 체결이라 arm 을 알 수 없다 — 반영하지 않는다", f.code)
             continue
-        arm, decision_id = row
+        arm, decision_id, action = row
+        if action in SELL_ACTIONS:
+            n += _apply_sell(conn, f, arm=arm, action=action, day=day)
+            continue
         terms = entry_terms(conn, decision_id, f.code, fill_price=f.price)
         name = conn.execute("SELECT name FROM listing WHERE code=? LIMIT 1", (f.code,)).fetchone()
         P.open_position(
@@ -318,6 +347,56 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
         )
         n += 1
     return n
+
+
+def _sell_qty(
+    conn: sqlite3.Connection,
+    code: str,
+    arm: int,
+    action: str,
+    weight_pct: float | None,
+    ref: int,
+    equity: int,
+) -> tuple[int, str]:
+    """파는 수량은 **보유분에서 나온다.** 목표비중으로 계산하면 방향이 반대가 된다.
+
+    - `EXIT` — 보유 전량
+    - `TRIM` — 보유 − 목표비중만큼. `weight_pct` 는 **축소 후 남길 비중**이다
+      (decision.schema.json). 그 차이가 파는 수량이다.
+    """
+    from decision import positions as P
+
+    _pid, held = P.open_qty(conn, code, arm)
+    if held <= 0:
+        return 0, f"{action} 인데 보유가 없다 — 팔 것이 없다"
+    if action == "EXIT":
+        return held, ""
+    keep = size_for(equity, weight_pct or 0, ref)
+    sell = held - keep
+    if sell <= 0:
+        return 0, f"TRIM 인데 목표 {keep}주가 보유 {held}주 이상이다 — 줄일 것이 없다"
+    return sell, ""
+
+
+def _apply_sell(conn: sqlite3.Connection, f: Fill, *, arm: int, action: str, day: str) -> int:
+    """판 것을 포지션에 반영한다. **`close_position`/`reduce_position` 이 손익의 정본이다** —
+    여기서 다시 계산하면 수수료·세금 규칙이 바뀔 때 과거 손익이 조용히 달라진다.
+    """
+    from decision import positions as P
+
+    pid, held = P.open_qty(conn, f.code, arm)
+    if pid is None:
+        # **없는 포지션을 만들어내지 않는다.** 매도 체결인데 보유가 없으면 대장과
+        # 계좌가 어긋난 것이고, 그 사실이 드러나야 한다.
+        log.error(
+            "%s: %s 체결인데 arm %d 에 열린 포지션이 없다 — 반영하지 않는다", f.code, action, arm
+        )
+        return 0
+    qty = min(f.qty, held)
+    if qty < f.qty:
+        log.warning("%s: 체결 %d주 > 보유 %d주 — 보유분까지만 반영한다", f.code, f.qty, held)
+    P.reduce_position(conn, pid, qty=qty, at=day, exit_price=f.price, exit_reason=action)
+    return 1
 
 
 def _price_from(spec: dict | None, *, fill_price: int, atr: float | None, sign: int) -> int | None:
