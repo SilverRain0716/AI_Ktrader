@@ -305,11 +305,18 @@ def build(
     *,
     now: datetime | None = None,
     exclude: set[str] | None = None,
+    channels: tuple[str, ...] | None = None,
+    quota: dict[str, int] | None = None,
 ) -> UniverseResult:
     """하드 필터 → 3채널 랭킹 → 합집합.
 
     `now` 는 "지금 몇 시인가" — 브리핑처럼 하루 안에서도 시점이 갈리는 입력의 상한이다.
     주지 않으면 as_of 의 장 마감(23:59)으로 둔다.
+
+    `channels`·`quota` 는 **측정용**이다. 채널을 빼면 유니버스가 나아지는지 재려면
+    같은 코드로 구성을 바꿔 돌릴 수 있어야 한다 — 스크립트가 build 를 베껴 쓰면
+    운영 경로와 측정 경로가 갈라지고, 그때 측정은 운영을 설명하지 못한다.
+    **운영 호출은 둘 다 주지 않는다.**
     """
     if now is None:
         now = datetime.combine(as_of, dtime(23, 59, 59), tzinfo=dcfg.KST)
@@ -328,12 +335,16 @@ def build(
         )
 
     picks: dict[str, Candidate] = {}
+    quota = quota or config.CHANNEL_QUOTA
+    wanted = channels or tuple(config.CHANNEL_QUOTA)
     for channel, fn in (
         ("briefing", lambda q: _briefing_channel(conn, pool, as_of, q, now)),
         ("momentum", lambda q: _momentum_channel(pool, q)),
         ("flow", lambda q: _flow_channel(pool, q)),
     ):
-        for code, reason in fn(config.CHANNEL_QUOTA[channel]):
+        if channel not in wanted:
+            continue
+        for code, reason in fn(quota.get(channel, 0)):
             c = picks.setdefault(code, pool[code])
             if channel not in c.channels:
                 c.channels.append(channel)
