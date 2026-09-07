@@ -411,3 +411,44 @@ def test_왜_안_나갔는지가_기록이다(db):
 
     for st in ("blocked", "superseded", "gapped", "expired"):
         assert st in L.UNFILLED, f"{st} 의 설명이 없다"
+
+
+# ── 5. 봉투 검사가 사이클에 붙어 있는가 ─────────────────
+
+
+def test_판단_사이클이_봉투_검사부터_돈다(monkeypatch):
+    """**만들어 놓고 아무도 안 부르면 안전망이 아니다.**
+
+    `gate/protect.py` 는 2026-09-07 에 생겼지만 러너에 없어서, 손절선을 뚫어도
+    보유기한이 지나도 아무 일이 없었다. 손으로 쳐야만 돌았다.
+
+    그리고 **판단보다 먼저**여야 한다 — 손절선·보유기한은 AI 의견을 묻지 않는다
+    (ADR 0009 봉투/선택 분리).
+    """
+    calls = []
+    monkeypatch.setattr(R, "_run", lambda a: calls.append(a) or 0)
+    R.run_cycle("premarket", day=date(2026, 9, 2), force=True)
+
+    names = [" ".join(a) for a in calls]
+    assert any("protect" in n for n in names), "봉투 검사가 사이클에 없다"
+    assert "protect" in names[0], f"판단보다 나중에 돈다: {names}"
+
+
+def test_봉투_검사가_고장나면_알린다(monkeypatch, caplog):
+    """0=벗어난 것 없음 · 1=강제 청산을 올렸다. 그 밖은 고장이다 —
+    조용히 넘어가면 **안전망이 죽은 채로 판단만 계속 돈다.**
+    """
+    monkeypatch.setattr(R, "_run", lambda a: 3 if "protect" in a else 0)
+    with caplog.at_level("ERROR"):
+        R.run_cycle("premarket", day=date(2026, 9, 2), force=True)
+    assert any("봉투 검사가 실패" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("rc", [0, 1])
+def test_강제_청산이_있어도_판단은_계속_돈다(monkeypatch, rc):
+    """`protect` 는 벗어난 것이 있으면 1 을 낸다. 그것을 실패로 보면
+    **청산 대상이 생긴 날 판단이 통째로 멈춘다.**"""
+    calls = []
+    monkeypatch.setattr(R, "_run", lambda a: (calls.append(a), rc if "protect" in a else 0)[1])
+    R.run_cycle("premarket", day=date(2026, 9, 2), force=True)
+    assert any("decide" in " ".join(a) for a in calls)

@@ -85,6 +85,14 @@ def run_cycle(cycle: str, *, day: date | None = None, force: bool = False) -> in
     if cycle == "data":
         rc = _run(["data.pipeline", "daily"])
     elif cycle in JUDGMENT_CYCLES:
+        # **봉투 검사가 먼저다.** 손절선·보유기한은 AI 의견을 묻지 않는다(ADR 0009) —
+        # 판단이 실패해도 이것은 돌아야 한다. 만들어 놓고 아무도 안 부르면
+        # 안전망이 아니다(2026-09-08 까지 실제로 그 상태였다).
+        if _run(["gate.pipeline", "protect", "--apply"]) not in (0, 1):
+            # 0 = 벗어난 것 없음 · 1 = 강제 청산을 올렸다. 그 밖은 **고장**이다 —
+            # 조용히 넘어가면 안전망이 죽은 채로 판단만 계속 돈다.
+            log.error("봉투 검사가 실패했다 — 손절선·보유기한이 이번 사이클에 강제되지 않았다")
+
         rc = _run(["decision.pipeline", "build", "--cycle", cycle])
         if rc == 0:
             rc = _run(["decision.pipeline", "decide"])
