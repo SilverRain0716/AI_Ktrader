@@ -1086,12 +1086,25 @@ def test_손실한도는_실제로_걸린다(db, monkeypatch):
     """
     monkeypatch.setenv("AIK_DAILY_LOSS_LIMIT_KRW", "1000000")
     today = NOW.date().isoformat()
-    db.execute(
-        "INSERT INTO paper_positions (code,name,qty,avg_price,opened_at,closed_at,"
-        "exit_price,exit_reason,realized_pnl_krw) "
-        "VALUES ('005930','삼성전자',10,70000,?,?,60000,'STOP',-1500000)",
-        (today, today),
+    from decision import positions as P
+
+    # **실제 청산 경로를 탄다.** 표에 직접 쓰면 실현손익 대장이 비어, 한도가
+    # 무엇을 보고 판정하는지가 테스트에서 사라진다 (2026-09-08).
+    P.open_position(
+        conn=db,
+        position_id=f"{today}-a1-005930",
+        arm=1,
+        code="005930",
+        name="삼성전자",
+        qty=150,
+        avg_price=70000,
+        opened_at=today,
     )
+    P.close_position(
+        db, f"{today}-a1-005930", closed_at=today, exit_price=60000, exit_reason="STOP"
+    )
+    assert P.realized_pnl_on(db, NOW.date(), 1) < -1_000_000
+
     p = pack.build(db, cycle="premarket", generated_at=NOW)
     assert p["constraints"]["daily_loss_limit_hit"] is True
 

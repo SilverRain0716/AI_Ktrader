@@ -72,6 +72,39 @@ def open_position(
     )
 
 
+def _record_lot(
+    conn: sqlite3.Connection,
+    position_id: str,
+    *,
+    at: str,
+    qty: int,
+    avg_price: float,
+    exit_price: int,
+    reason: str,
+) -> int:
+    """판 몫 하나를 **실현손익 대장에 남기고** 그 손익을 돌려준다.
+
+    포지션 행의 한 칸에만 담았더니 두 가지가 틀렸다.
+      1. `close_position` 이 그 칸을 **덮어써서** 이전 TRIM 의 손익이 사라졌다
+         (실측 2026-09-08: TRIM -25,056 → EXIT 뒤 +9,875 만 남았다)
+      2. 일부 청산은 `closed_at` 이 없어 **날짜별 실현손익에 안 잡혔다** —
+         일일 손실 한도가 그 값을 보므로 한도가 조용히 뚫린다
+    """
+    row = conn.execute(
+        "SELECT arm, code FROM paper_positions WHERE position_id=?", (position_id,)
+    ).fetchone()
+    arm, code = row if row else (1, "")
+    gross_buy = avg_price * qty * (1 + config.COMMISSION_RATE)
+    gross_sell = exit_price * qty * (1 - config.COMMISSION_RATE - config.TAX_RATE)
+    pnl = round(gross_sell - gross_buy)
+    conn.execute(
+        "INSERT INTO realized_lots (position_id,arm,code,at,qty,exit_price,reason,"
+        "realized_pnl_krw) VALUES (?,?,?,?,?,?,?,?)",
+        (position_id, arm, code, at[:10], qty, exit_price, reason, pnl),
+    )
+    return pnl
+
+
 def close_position(
     conn: sqlite3.Connection, position_id: str, *, closed_at: str, exit_price: int, exit_reason: str
 ) -> None:
@@ -82,12 +115,24 @@ def close_position(
     if not row:
         raise ValueError(f"열린 포지션이 아니다: {position_id}")
     qty, avg = row
-    gross_buy = avg * qty * (1 + config.COMMISSION_RATE)
-    gross_sell = exit_price * qty * (1 - config.COMMISSION_RATE - config.TAX_RATE)
+    pnl = _record_lot(
+        conn,
+        position_id,
+        at=closed_at,
+        qty=qty,
+        avg_price=avg,
+        exit_price=exit_price,
+        reason=exit_reason,
+    )
+    # **덮어쓰지 않고 더한다.** 앞선 TRIM 의 손익이 여기서 사라졌다 (2026-09-08).
+    prior = conn.execute(
+        "SELECT COALESCE(realized_pnl_krw, 0) FROM paper_positions WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0]
     conn.execute(
         "UPDATE paper_positions SET closed_at=?, exit_price=?, exit_reason=?, realized_pnl_krw=? "
         "WHERE position_id=?",
-        (closed_at, exit_price, exit_reason, round(gross_sell - gross_buy), position_id),
+        (closed_at, exit_price, exit_reason, prior + pnl, position_id),
     )
 
 
@@ -124,11 +169,18 @@ def reduce_position(
         )
         return 0
 
-    gross_buy = avg * qty * (1 + config.COMMISSION_RATE)
-    gross_sell = exit_price * qty * (1 - config.COMMISSION_RATE - config.TAX_RATE)
+    pnl = _record_lot(
+        conn,
+        position_id,
+        at=at,
+        qty=qty,
+        avg_price=avg,
+        exit_price=exit_price,
+        reason=exit_reason,
+    )
     conn.execute(
         "UPDATE paper_positions SET qty=?, realized_pnl_krw=? WHERE position_id=?",
-        (held - qty, round((prior or 0) + gross_sell - gross_buy), position_id),
+        (held - qty, (prior or 0) + pnl, position_id),
     )
     return held - qty
 
@@ -270,11 +322,15 @@ def cost_basis(conn: sqlite3.Connection, arm: int = 1) -> int:
 
 
 def realized_pnl_total(conn: sqlite3.Connection, arm: int = 1) -> int:
-    """청산 완료된 포지션의 실현손익 누계. 수수료·거래세가 이미 반영돼 있다."""
+    """실현손익 누계. 수수료·거래세가 이미 반영돼 있다.
+
+    **대장(`realized_lots`)에서 센다.** 예전에는 `closed_at IS NOT NULL` 인 포지션만
+    셌는데, 그러면 **일부 청산(TRIM)한 손익이 계좌에 안 잡힌다** — 아직 열려 있으므로
+    조건에 안 걸린다. 실측 2026-09-08: 우리금융지주 TRIM 의 -47,116 원이 빠져
+    현금과 총자산이 그만큼 부풀어 있었다.
+    """
     row = conn.execute(
-        "SELECT COALESCE(SUM(realized_pnl_krw), 0) FROM paper_positions "
-        "WHERE closed_at IS NOT NULL AND arm = ?",
-        (arm,),
+        "SELECT COALESCE(SUM(realized_pnl_krw), 0) FROM realized_lots WHERE arm = ?", (arm,)
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -316,10 +372,14 @@ def holdings_value(conn: sqlite3.Connection, arm: int = 1) -> int:
 
 
 def realized_pnl_on(conn: sqlite3.Connection, day: date, arm: int = 1) -> int:
+    """그날 확정된 손익. **일일 손실 한도가 이 값을 본다.**
+
+    포지션 행의 `closed_at` 으로 세면 **TRIM 은 날짜가 없어 안 잡힌다** — 한도가
+    조용히 뚫린다. 대장은 판 몫마다 날짜를 갖는다.
+    """
     row = conn.execute(
-        "SELECT COALESCE(SUM(realized_pnl_krw),0) FROM paper_positions "
-        "WHERE closed_at LIKE ? AND arm = ?",
-        (f"{day.isoformat()}%", arm),
+        "SELECT COALESCE(SUM(realized_pnl_krw),0) FROM realized_lots WHERE at = ? AND arm = ?",
+        (day.isoformat(), arm),
     ).fetchone()
     return int(row[0]) if row else 0
 
