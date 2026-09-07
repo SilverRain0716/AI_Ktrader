@@ -91,6 +91,58 @@ def close_position(
     )
 
 
+def reduce_position(
+    conn: sqlite3.Connection,
+    position_id: str,
+    *,
+    qty: int,
+    at: str,
+    exit_price: int,
+    exit_reason: str,
+) -> int:
+    """일부만 판다(TRIM). **평단은 바꾸지 않는다** — 판 몫의 손익만 확정한다.
+
+    남은 수량이 0 이 되면 `close_position` 과 같은 결과여야 하므로 그쪽으로 넘긴다.
+    두 경로가 손익을 각자 계산하면 전량 청산과 '전량만큼 축소'가 다른 숫자를 낸다.
+
+    실현손익은 **누적**한다. 두 번 줄이면 두 번의 손익이 더해져야 한다 —
+    덮어쓰면 첫 번째 축소가 없던 일이 된다.
+    """
+    row = conn.execute(
+        "SELECT qty, avg_price, realized_pnl_krw FROM paper_positions "
+        "WHERE position_id=? AND closed_at IS NULL",
+        (position_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"열린 포지션이 아니다: {position_id}")
+    held, avg, prior = row
+    if qty <= 0 or qty > held:
+        raise ValueError(f"{position_id}: 축소 수량 {qty} 가 보유 {held} 와 맞지 않는다")
+    if qty == held:
+        close_position(
+            conn, position_id, closed_at=at, exit_price=exit_price, exit_reason=exit_reason
+        )
+        return 0
+
+    gross_buy = avg * qty * (1 + config.COMMISSION_RATE)
+    gross_sell = exit_price * qty * (1 - config.COMMISSION_RATE - config.TAX_RATE)
+    conn.execute(
+        "UPDATE paper_positions SET qty=?, realized_pnl_krw=? WHERE position_id=?",
+        (held - qty, round((prior or 0) + gross_sell - gross_buy), position_id),
+    )
+    return held - qty
+
+
+def open_qty(conn: sqlite3.Connection, code: str, arm: int) -> tuple[str | None, int]:
+    """그 arm 이 이 종목을 몇 주 들고 있는가. **없으면 (None, 0)** 이다."""
+    row = conn.execute(
+        "SELECT position_id, qty FROM paper_positions "
+        "WHERE closed_at IS NULL AND code=? AND arm=? LIMIT 1",
+        (code, arm),
+    ).fetchone()
+    return (row[0], row[1]) if row else (None, 0)
+
+
 def _last_close(conn: sqlite3.Connection, code: str) -> tuple[int | None, str | None]:
     row = conn.execute(
         "SELECT close, date FROM ohlcv WHERE code=? AND halted=0 AND volume>0 "

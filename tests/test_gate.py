@@ -179,10 +179,54 @@ def test_실험_결정은_집행하지_않는다(db):
     assert not v.allowed and any("실험 결정" in b for b in v.blockers)
 
 
-@pytest.mark.parametrize("status", ["abstain", "schema_rejected", "api_error"])
-def test_ok_가_아닌_결정은_집행하지_않는다(db, status):
+@pytest.mark.parametrize("status", ["schema_rejected", "api_error"])
+def test_판단이_없는_결정은_집행하지_않는다(db, status):
     v = gcheck.evaluate(db, _decision(db, status=status), now=NOW)
     assert not v.allowed
+
+
+def test_abstain_은_신규만_막고_매도는_통과시킨다(db):
+    """**`abstain` 은 "신규 진입을 하지 않는다"이지 "아무것도 하지 않는다"가 아니다.**
+
+    통째로 막았더니 AI 가 낸 EXIT·TRIM 이 함께 차단됐다(2026-09-07) — 나가라는 판단이
+    나왔는데 주문이 안 나가는 것이 이 게이트에서 가장 나쁜 실패다.
+    """
+    import json as _j
+
+    db.execute(
+        "INSERT INTO context_packs (pack_id,cycle,generated_at,universe_size,position_count,"
+        "view_count,warning_count,payload) VALUES ('PA','midday',?,0,2,0,0,?)",
+        (NOW.isoformat(), _j.dumps({"constraints": {"allowed_entry_types": ["MARKET"]}})),
+    )
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('A-a2','live',1,'PA','s',2,'midday',?,?,'r1','abstain',?)",
+        (
+            NOW.isoformat(),
+            (NOW + timedelta(hours=5)).isoformat(),
+            _j.dumps(
+                {
+                    "decisions": [
+                        {"action": "EXIT", "code": "088350", "name": "x", "weight_pct": None},
+                        {"action": "TRIM", "code": "316140", "name": "y", "weight_pct": 7},
+                        {
+                            "action": "BUY",
+                            "code": "005930",
+                            "name": "z",
+                            "weight_pct": 10,
+                            "rank": 1,
+                            "entry": {"type": "MARKET"},
+                        },
+                    ]
+                }
+            ),
+        ),
+    )
+    v = gcheck.evaluate(db, "A-a2", now=NOW)
+    assert v.allowed
+    assert [o["code"] for o in v.orders] == ["088350", "316140"]
+    assert any("신규 진입은 내지 않는다" in n for n in v.notes)
 
 
 def test_만료된_결정은_집행하지_않는다(db):
@@ -581,3 +625,47 @@ def test_게이트는_순위에_밀린_후보를_주문하지_않는다(db):
         "SELECT status FROM order_intents WHERE decision_id='R-a1' AND code='035720'"
     ).fetchone()
     assert got and got[0] == "deferred", "밀린 후보를 남기지 않으면 나중에 셀 수 없다"
+
+
+def test_abstain_이어도_매도는_접수된다(db, monkeypatch):
+    """`place` 에도 같은 조기 종료가 있었다 — 게이트를 고쳐도 여기서 다시 사라졌다.
+    **같은 실수가 세 자리에 있었다**(check·place·status 검사, 2026-09-07).
+    """
+    from decision import positions as P
+    from gate import pipeline as gp
+
+    P.open_position(
+        conn=db,
+        position_id="p1",
+        arm=1,
+        code="005930",
+        name="삼성전자",
+        qty=10,
+        avg_price=70000,
+        opened_at="2026-08-31",
+    )
+    db.execute(
+        "INSERT INTO ohlcv (code,date,open,high,low,close,volume,halted,source,adjusted) "
+        "VALUES ('005930','2026-08-31',70000,70500,69500,70000,1000,0,'t',1)"
+    )
+    db.execute(
+        "INSERT INTO context_packs (pack_id,cycle,generated_at,universe_size,position_count,"
+        "view_count,warning_count,payload) VALUES ('PB','midday',?,0,1,0,0,'{}')",
+        (NOW.isoformat(),),
+    )
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('E-a1','live',1,'PB','s',1,'midday',?,?,'r1','abstain',?)",
+        (
+            NOW.isoformat(),
+            # `task_place` 는 실제 시계로 만료를 본다 — 고정 시각을 쓰면 언젠가 만료된다
+            "2099-01-01T00:00:00+09:00",
+            json.dumps({"decisions": [{"action": "EXIT", "code": "005930", "weight_pct": None}]}),
+        ),
+    )
+    monkeypatch.setattr(gp, "_latest_live", lambda _c: "E-a1")
+    gp.task_place(db, "E-a1", False)
+
+    got = db.execute("SELECT status, qty FROM order_intents WHERE code='005930'").fetchone()
+    assert got == ("sent", 10), f"abstain 이라고 매도가 사라졌다: {got}"

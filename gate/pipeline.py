@@ -132,14 +132,9 @@ def task_place(conn, decision_id: str | None, latest: bool) -> int:
         log.warning("  폐기 %s — %s", f.code, f.reason)
     conn.commit()
 
-    st = conn.execute(
-        "SELECT status FROM decisions WHERE decision_id=? ORDER BY attempt DESC LIMIT 1",
-        (decision_id,),
-    ).fetchone()
-    if st and st[0] == "abstain":
-        log.info("%s 은 abstain 이다 — 신규 접수 없음. 옛 미체결만 폐기했다", decision_id)
-        return 0
-
+    # **`abstain` 에서 조기 종료하지 않는다.** 신규 진입을 거르는 것은 게이트가 하고,
+    # 여기서 통째로 빠져나가면 같은 판단에 실린 EXIT·TRIM 이 함께 사라진다.
+    # 세 자리에 같은 실수가 있었다 — check·place·그리고 게이트의 status 검사(2026-09-07).
     v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed(gcfg.arm_of(decision_id)))
     for n in v.notes:
         log.info("알림: %s", n)
