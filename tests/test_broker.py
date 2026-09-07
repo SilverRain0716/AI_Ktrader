@@ -350,3 +350,117 @@ def test_대장에_없는_체결은_아무_계좌에도_넣지_않는다(db):
     fills = [gb.Fill("없는주문", "316140", gb.FILLED, qty=10, price=1000)]
     assert gb.apply_fills(db, fills, day="2026-09-04") == 0
     assert db.execute("SELECT COUNT(*) FROM paper_positions").fetchone()[0] == 0
+
+
+# ── 진입 조건을 포지션에 싣는다 ────────────────────────
+
+
+def _decision_with(db, did, at, decisions, *, pack_id="P", pack_payload=None):
+    import json as _j
+
+    if pack_payload is not None:
+        db.execute(
+            "INSERT OR IGNORE INTO context_packs (pack_id,cycle,generated_at,universe_size,"
+            "position_count,view_count,warning_count,payload) VALUES (?,'premarket',?,1,0,0,0,?)",
+            (pack_id, at, _j.dumps(pack_payload)),
+        )
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES (?,'live',1,?,'s',2,'premarket',?,?,'r1','ok',?)",
+        (did, pack_id, at, at, _j.dumps({"decisions": decisions})),
+    )
+    db.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+        "created_at,status,arm) VALUES ('i9',?,?,'BUY','paper','mock',?,'sent',2)",
+        (did, decisions[0]["code"], at),
+    )
+
+
+_INV = {"type": "flow_reversal", "value": 2, "deadline": None, "text": None}
+
+
+def test_진입_근거와_무효화_조건이_포지션에_남는다(db):
+    """없으면 **무효화 감시가 포지션을 통째로 건너뛴다**(`WHERE invalidation IS NOT NULL`).
+    손절선도 보유기한도 없이 무기한 방치된다 — 2026-09-07 에 실제로 그 상태였다.
+    """
+    import json as _j
+
+    _decision_with(
+        db,
+        "D-a2",
+        "2026-09-04T08:27:00+09:00",
+        [
+            {
+                "action": "BUY",
+                "code": "316140",
+                "name": "우리금융지주",
+                "weight_pct": 15,
+                "rank": 1,
+                "reasons": ["거래대금 2.03배", "외국인 3일 순매수"],
+                "invalidation": _INV,
+                "stop": {"type": "ATR", "value": 1.5},
+                "max_hold_days": 20,
+            }
+        ],
+        pack_payload={"universe": [{"code": "316140", "indicators": {"atr14": 1000}}]},
+    )
+    gb.apply_fills(db, [gb.Fill("i9", "316140", gb.FILLED, 86, 34650)], day="2026-09-04")
+
+    r = db.execute(
+        "SELECT entry_decision_id,entry_thesis,invalidation,stop_price,max_hold_days "
+        "FROM paper_positions WHERE code='316140'"
+    ).fetchone()
+    assert r[0] == "D-a2"
+    assert "거래대금 2.03배" in r[1]
+    assert _j.loads(r[2]) == _INV
+    # 1.5 ATR = 1,500 을 **체결가**에서 뺀다 (결정 시점 종가가 아니다)
+    assert r[3] == 34650 - 1500
+    assert r[4] == 20
+
+
+def test_ATR_을_모르면_손절선을_만들어내지_않는다(db):
+    """0 이나 체결가를 넣으면 손절선이 있는 것처럼 보이면서 **즉시 걸리거나 영원히 안 걸린다.**"""
+    _decision_with(
+        db,
+        "D2-a2",
+        "2026-09-04T08:27:00+09:00",
+        [
+            {
+                "action": "BUY",
+                "code": "316140",
+                "name": "우리금융지주",
+                "weight_pct": 15,
+                "rank": 1,
+                "reasons": ["근거"],
+                "invalidation": _INV,
+                "stop": {"type": "ATR", "value": 1.5},
+                "max_hold_days": 20,
+            }
+        ],
+        pack_payload={"universe": []},  # ATR 없음
+    )
+    gb.apply_fills(db, [gb.Fill("i9", "316140", gb.FILLED, 86, 34650)], day="2026-09-04")
+    got = db.execute("SELECT stop_price,invalidation FROM paper_positions").fetchone()
+    assert got[0] is None
+    assert got[1] is not None, "손절선을 못 세워도 무효화 조건은 남아야 한다"
+
+
+def test_손절은_결정_시점이_아니라_체결가에서_잰다(db):
+    """의도한 배수가 되려면 **실제로 들어간 가격**이 기준이어야 한다."""
+    terms = gb.entry_terms.__doc__
+    assert "체결가에서" in terms
+
+
+def test_결정을_못_찾아도_포지션은_연다(db):
+    """진입 조건이 없다고 체결을 버리면 **계좌와 어긋난다.** 조건만 NULL 로 둔다."""
+    db.execute(
+        "INSERT INTO order_intents (intent_id,decision_id,code,action,mode,kiwoom_env,"
+        "created_at,status,arm) VALUES ('i9','없는결정','316140','BUY','paper','mock',"
+        "'2026-09-04T08:27:00+09:00','sent',2)"
+    )
+    assert (
+        gb.apply_fills(db, [gb.Fill("i9", "316140", gb.FILLED, 86, 34650)], day="2026-09-04") == 1
+    )
+    got = db.execute("SELECT qty,invalidation FROM paper_positions").fetchone()
+    assert got == (86, None)
