@@ -54,7 +54,7 @@ RENDER_VERSION = "r1"
 # v5: 진입 방식을 팩이 허용한 것만 쓰게 했다. v4 엔진이 SK이노베이션을 잘 골라놓고
 # COND 로 내서 게이트가 차단했다 — 조건을 감시할 실시간 코드가 0줄이라 집행할 수 없다.
 # 팩에 allowed_entry_types 를 실어 알려준다(ADR 0003 원칙 1: 팩에 없는 것은 AI 에게 없다).
-PROMPT_ID = "decision_v8"
+PROMPT_ID = "decision_v9"
 API_PARAMS: dict[str, Any] = {
     "max_tokens": 16000,
     "output_config": {"effort": "high"},
@@ -177,14 +177,19 @@ def pack_for_arm(pack: dict, arm: int, conn=None) -> dict:
 # ── 렌더링 ──────────────────────────────────────────────
 
 
-def render_input(pack: dict, arm: int) -> str:
+def render_input(pack: dict, arm: int, conn=None) -> str:
     """모델에 보낼 입력. **결정론적이어야 한다** — `render_input(pack) == 저장된 바이트`가
     재현 검사이자 회귀 테스트이기 때문이다(ADR 0007 근거 5).
 
     그래서 `sort_keys=True` 다. 딕셔너리 순서가 파이썬 버전이나 삽입 순서에 흔들리면
     같은 팩이 다른 입력을 만들고, 그때 재현 검사는 통과하지 않는 것이 아니라 **의미를 잃는다.**
+
+    **`conn` 을 검증 쪽과 똑같이 준다.** 처음에는 여기만 `conn` 없이 불렀고, 그래서
+    `validate()` 는 arm 2 계좌로 검사하는데 **모델에는 arm 1 팩(보유 0)이 갔다** —
+    모델이 받지 못한 정보로 채점당한 셈이다. 2026-09-07 에 arm 2 가 그대로 말했다:
+    *"현재 positions 배열이 비어 있어 비중·손절가·보유기간을 확인할 수 없다"*.
     """
-    body = pack_for_arm(pack, arm)
+    body = pack_for_arm(pack, arm, conn)
     return json.dumps(body, ensure_ascii=False, sort_keys=True, indent=1)
 
 
@@ -228,6 +233,21 @@ def validate(payload: dict, pack_input: dict, arm: int) -> list[str]:
                 problems.append(f"{code}: briefing_refs 의 {ref} 가 입력에 없다")
         if arm == 2 and d.get("briefing_refs"):
             problems.append(f"{code}: **Arm 2 인데 briefing_refs 가 있다 — 파생 누수다**")
+
+    # ── 보유 종목은 **반드시 언급된다** ──
+    # `abstain` 은 "신규 진입을 하지 않는다"는 뜻이지 "아무 말도 하지 않는다"가 아니다.
+    # 프롬프트가 그렇게 적고 있었는데 **강제하는 코드가 없었다** — 검사가 한 방향뿐이라
+    # "결정에 나온 종목이 보유 중인가"만 보고 "보유 중인 종목이 결정에 나왔는가"는
+    # 안 봤다. 2026-09-07 에 arm 2 가 손절선의 3/4 까지 온 2 종목을 통째로 빠뜨렸다.
+    #
+    # 들고 있는 것을 안 쳐다보면 아무도 안 쳐다본다 — 감시기는 invalidation 만 보고,
+    # 손절 집행 코드는 아직 0 줄이다.
+    addressed = {d["code"] for d in payload.get("decisions", [])}
+    for code in held:
+        if code not in addressed:
+            problems.append(
+                f"{code}: 보유 중인데 결정이 없다 — HOLD/ADD/TRIM/EXIT 중 하나를 반드시 낸다"
+            )
 
     # ── 산술 재검증 (constraints 강제) ──
     if con:
@@ -312,6 +332,21 @@ def _liquidity_problems(entries, universe, pack_input, con) -> list[str]:
 
 
 # ── 저장 ────────────────────────────────────────────────
+
+
+def _retry_note(problems: list[str]) -> str:
+    """다음 시도에 붙일 지적. **팩 본문 뒤에 덧붙인다** — 팩 자체를 고치면
+    `pack_sha256` 이 가리키는 것과 실제로 보낸 것이 갈라진다.
+
+    실제로 보낸 전문은 `rendered_input` 에 그대로 남으므로, 어느 시도가 무엇을 보고
+    무엇을 냈는지 나중에 추적할 수 있다.
+    """
+    lines = "\n".join(f"- {x}" for x in problems[:10])
+    return (
+        "\n\n=== 직전 시도가 거부됐다. 아래를 고쳐서 다시 내라 ===\n"
+        f"{lines}\n"
+        "위 지적만 고치고 나머지 판단은 유지한다. 같은 출력을 다시 내지 마라.\n"
+    )
 
 
 def _valid_until(cycle: str, now: datetime) -> str:
@@ -414,7 +449,8 @@ def decide(
     provider = provider or _provider(client=client)
     model = providers.resolve_model(provider, model)
     pack_input = pack_for_arm(pack, arm, conn)
-    rendered = render_input(pack, arm)
+    # **검증한 것과 보낸 것이 같아야 한다.** 다시 파생하지 않고 그대로 직렬화한다.
+    rendered = json.dumps(pack_input, ensure_ascii=False, sort_keys=True, indent=1)
     prompt = prompt_text()
     schema = _schema()
     validator = Draft202012Validator(schema)
@@ -437,11 +473,16 @@ def decide(
         "rendered_input": rendered,
     }
     last: dict = {}
+    retry_note = ""
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        row = {**base, "attempt": attempt}
+        # **무엇이 틀렸는지 알려주지 않는 재요청은 그냥 반복이다.** 처음에는 같은 입력을
+        # 그대로 세 번 보냈다 — 2026-09-07 에 arm 2 가 "보유 종목에 결정이 없다"로
+        # 세 번 똑같이 거부됐고 비용만 3배가 됐다. 모델은 자기 출력을 보지 못한다.
+        sent = rendered + retry_note
+        row = {**base, "attempt": attempt, "rendered_input": sent}
         try:
-            got = call_model(provider, model, rendered, prompt, schema)
+            got = call_model(provider, model, sent, prompt, schema)
         except (DecisionRefused, providers.MissingCredential):
             # 설정 문제는 재시도할 것이 아니다. 3번 실패로 기록하면 원인이 가려진다.
             raise
@@ -489,6 +530,7 @@ def decide(
             )
             save_decision(conn, row)
             last = row
+            retry_note = _retry_note(errors)
             continue
 
         problems = contract.check_payload(payload) + validate(payload, pack_input, arm)
@@ -502,6 +544,7 @@ def decide(
             save_decision(conn, row)
             last = row
             log.warning("arm %d 시도 %d — 계약 위반 %d건", arm, attempt, len(problems))
+            retry_note = _retry_note(problems)
             continue
 
         # 러너가 봉인한다 — 모델이 만든 값이 아니다
