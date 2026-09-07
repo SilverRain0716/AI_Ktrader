@@ -21,7 +21,7 @@ from data import config
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -298,6 +298,29 @@ CREATE INDEX IF NOT EXISTS idx_margin_asof ON margin_grades(as_of, margin_pct);
 --
 -- `decision_id` 가 UNIQUE 다 — 같은 결정으로 두 번 주문하지 않는다는 뜻이다.
 -- 멱등키는 모델이 아니라 러너가 만든다(ADR 0007).
+-- 실현손익 대장. **판 몫마다 한 줄**이고, 여기가 정본이다.
+--
+-- 예전에는 `paper_positions.realized_pnl_krw` 한 칸에 담았다. 그래서 두 가지가 틀렸다.
+--   1. `close_position` 이 그 칸을 **덮어써서** 이전 TRIM 의 손익이 사라졌다
+--      (실측: TRIM -25,056 → EXIT 뒤 +9,875 만 남았다)
+--   2. 일부 청산은 `closed_at` 이 없어서 **날짜별 실현손익에 안 잡혔다** —
+--      일일 손실 한도가 그 값을 보므로 한도가 조용히 뚫린다
+--
+-- 손익은 여기 저장된 값을 쓴다. 다시 계산하면 수수료·세금 규칙이 바뀔 때
+-- 과거 손익이 조용히 달라진다.
+CREATE TABLE IF NOT EXISTS realized_lots (
+    lot_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id      TEXT NOT NULL,
+    arm              INTEGER NOT NULL,
+    code             TEXT NOT NULL,
+    at               TEXT NOT NULL,     -- KST 날짜 (YYYY-MM-DD)
+    qty              INTEGER NOT NULL,
+    exit_price       INTEGER NOT NULL,
+    reason           TEXT,
+    realized_pnl_krw INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lots_arm_at ON realized_lots(arm, at);
+
 CREATE TABLE IF NOT EXISTS order_intents (
     intent_id    TEXT PRIMARY KEY,      -- decision_id + 종목. 결정 하나가 여러 종목을 낸다
     decision_id  TEXT NOT NULL,
@@ -511,6 +534,7 @@ _MIGRATIONS: dict[int, object] = {
     16: _migrate_v16,  # order_intents 의 가격을 지정가·기준가·체결가로 나눈다
     17: _migrate_v17,  # arm 별 독립 가상 계좌 (3-arm 대응비교)
     18: _migrate_v18,  # decisions.cached_input_tokens — 캐시 적중률을 잰다
+    19: "",  # realized_lots 추가 — _SCHEMA 재실행으로 충분
 }
 
 
