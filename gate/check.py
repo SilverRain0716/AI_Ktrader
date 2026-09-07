@@ -23,6 +23,7 @@ from datetime import datetime
 from data import config as dcfg
 from decision import selection
 from gate import config as gcfg
+from gate import protect
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,9 @@ def evaluate(
         )
 
     run_kind, status, valid_until, payload = row
-    if run_kind != "live":
+    # `protect` 는 기계 안전망이 만든 강제 청산이다 — 판단이 아니지만 집행 대상이다.
+    # **`run_kind` 로 갈라 두면 판단 통계(abstain 비율·F2·F3)가 오염되지 않는다.**
+    if run_kind not in ("live", protect.RUN_KIND):
         blockers.append(f"run_kind={run_kind} — 실험 결정은 집행하지 않는다")
     # **`abstain` 은 "신규 진입을 하지 않는다"이지 "아무것도 하지 않는다"가 아니다.**
     # 여기서 통째로 막았더니 AI 가 낸 EXIT·TRIM 이 함께 차단됐다(2026-09-07) —
