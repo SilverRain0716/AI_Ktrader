@@ -267,20 +267,47 @@ def _signed(v: float | None) -> str:
 
 
 def _flow_channel(pool: dict[str, Candidate], quota: int) -> list[tuple[str, str]]:
-    """서사보다 앞서는 자금 흐름. 연속 순매수 + 시총 대비 순매수 강도."""
+    """서사보다 앞서는 자금 흐름. **양쪽이 함께 사고, 거래대금이 살아 있을 때만.**
+
+    처음에는 `max(외국인일수, 기관일수) >= 3` (OR) 에 순매수 **합계**가 양수이기만 하면
+    통과였고, `volume_ratio` 는 아예 보지 않았다. 실측 60거래일 결과다
+    (모집단 대비 +5/+10/+20일):
+
+        양쪽 매수 · 거래대금 늘고   +0.9p  +3.3p  +2.7p   (표본 290)
+        양쪽 매수 · 거래대금 식고   +0.2p  -1.1p  +0.3p   (표본 674)
+        한쪽만  · 거래대금 늘고    -1.2p  +1.9p  -0.5p   (표본 447)
+        한쪽만  · 거래대금 식고    -0.2p  -0.0p  -1.0p   (표본 986)
+
+    **세 구간 모두 양수인 조합은 첫 줄 하나뿐**이고, 가장 나쁜 조합이 표본의 절반을
+    차지하고 있었다. 그래서 둘을 조인다.
+
+    1. **OR 을 AND 로.** 순매수 합계가 양수여도 한쪽이 다른 쪽을 상쇄한 것일 수 있다 —
+       실리콘투(외 +2,078억 / 기 -1,814억)가 그랬다. 그 사례를 **근거 문장에만 적고
+       필터에는 안 넣었던** 것이 이 채널의 원래 결함이다(ADR 0010).
+    2. **거래대금이 식으면 뺀다.** 프롬프트가 이미 *"거래대금이 식은 채로 이어지는
+       매집은 관심이 빠지는 중일 수 있다"* 고 말하는데 채널이 그 종목을 뽑고 있었다.
+
+    **정원을 못 채우는 것이 정상이다.** 조건을 만족하는 종목이 하루 5~6개면 5~6개만
+    올리는 편이, 20개를 채우려고 나쁜 조합을 끌어오는 것보다 정직하다.
+    """
     scored = []
     for c in pool.values():
         f = c.flows
         fd = f.get("foreign_net_days") or 0
         idd = f.get("inst_net_days") or 0
-        if max(fd, idd) < config.FLOW_MIN_NET_DAYS:
+        if min(fd, idd) < config.FLOW_MIN_NET_DAYS:
+            continue
+        fnet = f.get("foreign_net_5d_eok_krw") or 0
+        inet = f.get("inst_net_5d_eok_krw") or 0
+        # 합계가 아니라 **각각** 양수여야 한다. 합계로 보면 상쇄가 통과한다.
+        if fnet <= 0 or inet <= 0:
+            continue
+        if (c.indicators.get("volume_ratio") or 0) < config.FLOW_MIN_VOLUME_RATIO:
             continue
         cap = c.indicators.get("market_cap_eok_krw")
         if not cap:
             continue
-        net = (f.get("foreign_net_5d_eok_krw") or 0) + (f.get("inst_net_5d_eok_krw") or 0)
-        if net <= 0:
-            continue
+        net = fnet + inet
         intensity = net / cap * 100
         scored.append(
             (
@@ -305,11 +332,18 @@ def build(
     *,
     now: datetime | None = None,
     exclude: set[str] | None = None,
+    channels: tuple[str, ...] | None = None,
+    quota: dict[str, int] | None = None,
 ) -> UniverseResult:
     """하드 필터 → 3채널 랭킹 → 합집합.
 
     `now` 는 "지금 몇 시인가" — 브리핑처럼 하루 안에서도 시점이 갈리는 입력의 상한이다.
     주지 않으면 as_of 의 장 마감(23:59)으로 둔다.
+
+    `channels`·`quota` 는 **측정용**이다. 채널을 빼면 유니버스가 나아지는지 재려면
+    같은 코드로 구성을 바꿔 돌릴 수 있어야 한다 — 스크립트가 build 를 베껴 쓰면
+    운영 경로와 측정 경로가 갈라지고, 그때 측정은 운영을 설명하지 못한다.
+    **운영 호출은 둘 다 주지 않는다.**
     """
     if now is None:
         now = datetime.combine(as_of, dtime(23, 59, 59), tzinfo=dcfg.KST)
@@ -328,12 +362,16 @@ def build(
         )
 
     picks: dict[str, Candidate] = {}
+    quota = quota or config.CHANNEL_QUOTA
+    wanted = channels or tuple(config.CHANNEL_QUOTA)
     for channel, fn in (
         ("briefing", lambda q: _briefing_channel(conn, pool, as_of, q, now)),
         ("momentum", lambda q: _momentum_channel(pool, q)),
         ("flow", lambda q: _flow_channel(pool, q)),
     ):
-        for code, reason in fn(config.CHANNEL_QUOTA[channel]):
+        if channel not in wanted:
+            continue
+        for code, reason in fn(quota.get(channel, 0)):
             c = picks.setdefault(code, pool[code])
             if channel not in c.channels:
                 c.channels.append(channel)

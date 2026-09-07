@@ -342,6 +342,91 @@ def task_indicators(conn, *, limit: int | None) -> None:
     log.info("지표 완료 — 계산 %d / 건너뜀 %d", ok, skip)
 
 
+def task_indicators_backfill(conn, *, days: int, limit: int | None) -> None:
+    """지표를 **과거 날짜에도** 계산한다. 측정하려면 표본이 있어야 한다.
+
+    `task_indicators` 는 마지막 봉 하나만 계산한다. 그래서 지표가 며칠치뿐이었고
+    (2026-09-07 기준 5일), 채널·규칙을 재려 해도 표본이 없었다 — 15일을 쟀다고
+    생각했는데 실제로는 같은 5일을 재사용한 것이었다.
+
+    ## 시가총액은 그날 주가로 환산한다
+
+    오늘 시총을 과거에 그대로 대면 **최근 급등한 종목이 과거 필터를 통과한다** —
+    하드 필터의 `market_cap_eok_krw >= 3,000억` 이 미래 정보를 쓰게 된다.
+    주식 수가 그 사이 변하지 않았다고 보고 `cap_d = cap_now × close_d / close_now`
+    로 근사한다. **증자·감자·액면분할이 있었으면 틀린다** — 그 사실을 여기 적어둔다.
+    """
+    started = _now()
+    benchmarks = {name: store.load_ohlcv(conn, sym) for name, sym in config.INDEX_SYMBOLS.items()}
+
+    dates = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT date FROM ohlcv WHERE volume>0 ORDER BY date DESC LIMIT ?", (days,)
+        ).fetchall()
+    ]
+    if not dates:
+        log.error("일봉이 없다")
+        return
+    log.info("지표 소급 — %s ~ %s (%d거래일)", dates[-1], dates[0], len(dates))
+
+    rows = conn.execute(
+        "SELECT code, market, market_cap FROM listing WHERE is_preferred=0 AND is_spac=0 "
+        "ORDER BY market_cap DESC"
+    ).fetchall()
+    if limit:
+        rows = rows[:limit]
+
+    wanted = set(dates)
+    ok = skip = 0
+    for code, market, mcap in rows:
+        df = store.load_ohlcv(conn, code)
+        if df.empty:
+            skip += 1
+            continue
+        bm = benchmarks.get(market)
+        flows_all = _load_flows(conn, code)
+        last_close = float(df["close"].iloc[-1]) or None
+        for i in range(len(df)):
+            d = str(df["date"].iloc[i])[:10]
+            if d not in wanted:
+                continue
+            window = df.iloc[: i + 1]
+            if len(window) < 2:
+                continue
+            cap = None
+            if mcap and last_close:
+                cap = mcap * float(window["close"].iloc[-1]) / last_close
+            ind = indicators.compute(
+                window,
+                benchmark=bm[bm["date"] <= window["date"].iloc[-1]] if bm is not None else None,
+                market_cap_krw=cap,
+            )
+            # `flows.date` 는 문자열, `ohlcv.date` 는 date 객체다 — 섞으면 비교가 터진다
+            fl = flows_all[flows_all["date"].astype(str) <= d] if not flows_all.empty else flows_all
+            payload = {
+                "indicators": ind.to_dict(),
+                "flows": indicators.compute_flows(fl, window["close"]),
+                "bars": len(window),
+            }
+            store.upsert_indicators(
+                conn, code, window["date"].iloc[-1], json.dumps(payload, ensure_ascii=False)
+            )
+            ok += 1
+        conn.commit()
+
+    store.log_ingest(
+        conn,
+        started_at=started,
+        task="indicators_backfill",
+        target=None,
+        status="ok",
+        rows=ok,
+        detail=f"{len(dates)}거래일 · 건너뜀 {skip}",
+    )
+    log.info("지표 소급 완료 — %d행 / 건너뜀 %d종목", ok, skip)
+
+
 def _load_flows(conn, code: str):
     import pandas as pd
 
@@ -543,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=[
             "listing",
             "ohlcv",
+            "indicators-backfill",
             "flows",
             "disclosures",
             "indicators",
@@ -581,6 +667,12 @@ def main(argv: list[str] | None = None) -> int:
             task_disclosures(conn, days=args.days)
         elif args.task == "indicators":
             task_indicators(conn, limit=args.limit)
+        elif args.task == "indicators-backfill":
+            # `--days` 는 공시 수집과 기본값을 공유한다(5). 소급에는 그게 너무 짧아
+            # **명시하지 않으면 60거래일**로 본다 — 표본을 만들려고 도는 작업이다.
+            task_indicators_backfill(
+                conn, days=args.days if args.days != 5 else 60, limit=args.limit
+            )
         elif args.task == "status":
             task_status(conn)
         elif args.task == "briefings":
