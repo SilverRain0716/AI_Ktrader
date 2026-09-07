@@ -11,7 +11,7 @@ import json
 import sqlite3
 
 import pytest
-from _fakes import FakeClient, _decision, _pack, _payload, _resp
+from _fakes import FakeClient, _decision, _hold, _pack, _payload, _resp
 
 from data import store
 from decision import contract, engine
@@ -125,7 +125,7 @@ def test_팩과_어긋나는_결정을_잡는다(decisions, hint) -> None:
 
 def test_정상_결정은_통과한다() -> None:
     p = _pack()
-    assert engine.validate(_payload(), p, 1) == []
+    assert engine.validate(_payload([_decision(), _hold("000660")]), p, 1) == []
 
 
 def test_섹터_한도는_거부가_아니라_미룸이다() -> None:
@@ -139,7 +139,7 @@ def test_섹터_한도는_거부가_아니라_미룸이다() -> None:
     p = _pack()
     p["constraints"]["max_weight_pct_per_sector"] = 15.0
     # 000660(반도체) 10% 보유 + 005930(반도체) 10% 신규 = 20% > 15%
-    assert engine.validate(_payload(), p, 1) == []
+    assert engine.validate(_payload([_decision(), _hold("000660")]), p, 1) == []
     sel = selection.select(
         [_decision()],
         constraints=p["constraints"],
@@ -186,7 +186,7 @@ def test_정상_응답은_ok_로_기록된다(conn) -> None:
     assert row["status"] == "ok"
     assert row["attempt"] == 1
     assert row["decision_id"] == contract.decision_id("20260830-0929-premarket", 1)
-    assert row["rendered_input"] == engine.render_input(_pack(), 1)  # 재현 검사
+    assert row["rendered_input"] == engine.render_input(_pack(), 1, conn)  # 재현 검사
     assert row["pack_sha256"] == contract.canonical_sha256(_pack())
     assert len(_rows(conn)) == 1
 
@@ -526,9 +526,102 @@ def test_장중이면_지금_값으로_거리를_잰다() -> None:
     p = _pack()
     p["universe"][0]["spot"] = {"price": 84000, "change_pct": 20.0, "as_of": "x"}
     # 전 거래일 종가 70,000 대비로는 20% 벌어졌지만, 지금 값 84,000 대비로는 1.2% 다
-    payload = _payload([_decision(entry={"type": "LIMIT", "price": 83000})])
+    payload = _payload([_decision(entry={"type": "LIMIT", "price": 83000}), _hold("000660")])
     assert engine.validate(payload, p, 1) == []
 
     # spot 이 없으면(장 밖·시세 결손) 전 거래일 종가가 기준이다
     p["universe"][0]["spot"] = None
     assert any("벌어졌다" in x for x in engine.validate(payload, p, 1))
+
+
+def test_보유_종목을_빠뜨리면_거부한다() -> None:
+    """`abstain` 은 "신규 진입을 하지 않는다"는 뜻이지 "아무 말도 하지 않는다"가 아니다.
+
+    프롬프트가 그렇게 적고 있었는데 **강제하는 코드가 없었다.** 검사가 한 방향뿐이라
+    "결정에 나온 종목이 보유 중인가"만 보고 그 반대를 안 봤다 — 2026-09-07 에 arm 2 가
+    손절선의 3/4 까지 온 2 종목을 통째로 빠뜨렸다.
+    """
+    p = _pack()  # 000660 을 보유 중이다
+    got = engine.validate(_payload([]), p, 1)
+    assert any("000660" in x and "보유 중인데 결정이 없다" in x for x in got), got
+
+
+def test_보유_종목을_HOLD_로_언급하면_통과한다() -> None:
+    p = _pack()
+    hold = _decision(
+        action="HOLD", code="000660", rank=None, weight_pct=None, entry=None, stop=None
+    )
+    assert engine.validate(_payload([hold]), p, 1) == []
+
+
+def test_EXIT_도_언급으로_친다() -> None:
+    """청산도 결정이다 — 빠뜨린 것과 다르다."""
+    p = _pack()
+    ex = _decision(
+        action="EXIT",
+        code="000660",
+        rank=None,
+        weight_pct=None,
+        entry=None,
+        stop=None,
+        max_hold_days=None,
+    )
+    assert engine.validate(_payload([ex]), p, 1) == []
+
+
+def test_재요청은_무엇이_틀렸는지_알려준다(conn) -> None:
+    """**알려주지 않는 재요청은 그냥 반복이다.** 처음에는 같은 입력을 그대로 세 번 보냈고,
+    2026-09-07 에 arm 2 가 "보유 종목에 결정이 없다"로 세 번 똑같이 거부됐다.
+    모델은 자기 출력을 보지 못한다 — 지적을 입력에 실어야 고칠 수 있다.
+    """
+    bad = _payload([_decision(code="999999")])  # 유니버스에 없는 종목
+    good = _payload()
+    client = FakeClient(_resp(bad), _resp(good))
+    row = engine.decide(conn, _pack(), 1, client=client)
+
+    assert row["status"] == "ok"
+    # 두 번째 요청에는 첫 번째의 지적이 실려 있다
+    second = client.calls[1]
+    sent = json.dumps(second, ensure_ascii=False)
+    assert "직전 시도가 거부됐다" in sent
+    assert "999999" in sent
+
+
+def test_첫_시도에는_지적이_붙지_않는다(conn) -> None:
+    """지적 없이 시작해야 `rendered_input` 이 팩과 일치한다 — 재현 검사의 근거다."""
+    client = FakeClient(_resp(_payload()))
+    row = engine.decide(conn, _pack(), 1, client=client)
+    assert row["rendered_input"] == engine.render_input(_pack(), 1, conn)
+    assert "직전 시도가 거부됐다" not in row["rendered_input"]
+
+
+def test_실제로_보낸_전문이_남는다(conn) -> None:
+    """지적을 붙였으면 **붙인 것이 남아야** 어느 시도가 무엇을 보고 무엇을 냈는지 안다."""
+    client = FakeClient(_resp(_payload([_decision(code="999999")])), _resp(_payload()))
+    engine.decide(conn, _pack(), 1, client=client)
+    rows = conn.execute("SELECT attempt, rendered_input FROM decisions ORDER BY attempt").fetchall()
+    assert "직전 시도가 거부됐다" not in rows[0][1]
+    assert "직전 시도가 거부됐다" in rows[1][1]
+
+
+def test_모델에_보낸_팩과_검증한_팩이_같다(conn) -> None:
+    """처음에는 `render_input` 만 `conn` 없이 불렀다. 그래서 `validate()` 는 arm 2 계좌로
+    검사하는데 **모델에는 arm 1 팩(보유 0)이 갔다** — 받지 못한 정보로 채점당한 셈이다.
+    2026-09-07 에 arm 2 가 그대로 말했다: *"positions 배열이 비어 있어 확인할 수 없다"*.
+    """
+    from decision import positions as P
+
+    P.open_position(
+        conn,
+        position_id="p1",
+        arm=2,
+        code="000660",
+        name="SK하이닉스",
+        qty=1,
+        avg_price=100,
+        opened_at="2026-08-29",
+    )
+    client = FakeClient(_resp(_payload([_decision(), _hold("000660")])))
+    row = engine.decide(conn, _pack(), 2, client=client)
+    sent = json.loads(row["rendered_input"])
+    assert [p["code"] for p in sent["positions"]] == ["000660"], "arm 2 보유가 입력에 없다"

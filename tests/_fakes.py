@@ -89,11 +89,31 @@ def _decision(code="005930", **over) -> dict:
     return d
 
 
+def _hold(code: str) -> dict:
+    """보유 종목을 유지한다는 결정. 진입 관련 필드는 전부 null 이다."""
+    return _decision(
+        action="HOLD",
+        code=code,
+        rank=None,
+        weight_pct=None,
+        entry=None,
+        stop=None,
+        max_hold_days=None,
+    )
+
+
 def _payload(decisions=None, **over) -> dict:
     p = {
         "market_view": "코스피 20일선 위.",
         "abstain": False,
         "abstain_reason": None,
+        # 기본 payload 는 **보유 종목(000660)을 언급한다.** `_pack()` 이 그것을 들고 있고,
+        # 보유를 빠뜨린 결정은 이제 거부되기 때문이다 — 픽스처가 그 규칙을 어기면
+        # 모든 테스트가 "규칙 없는 세계"를 검사하게 된다.
+        # 기본값에 `_hold("000660")` 을 넣지 않는다. `decide(conn=...)` 는 **DB 에서**
+        # 보유를 다시 읽는데(swap_account) 테스트 DB 는 비어 있어서, 픽스처가 들고 있다고
+        # 주장하면 "보유 종목이 아니다" 로 거부된다. 팩만 넘기는 `validate()` 테스트는
+        # `_hold()` 를 직접 붙인다.
         "decisions": decisions if decisions is not None else [_decision()],
         "portfolio_note": None,
         "data_concerns": [],

@@ -274,6 +274,17 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
     **분리해 놓고 마지막 단계에서 합쳐버린 것**이라 F2·F3 를 잴 수 없게 된다.
 
     각 체결의 arm 은 그 주문을 낸 `order_intents` 행이 정본이다.
+
+    ## 진입 조건도 함께 싣는다
+
+    처음에는 수량·평단만 넣었다. 그래서 `entry_thesis`·`invalidation`·`stop_price`·
+    `max_hold_days` 가 전부 NULL 이었고, 그 결과 **무효화 감시가 포지션을 통째로
+    건너뛰었다**(`WHERE invalidation IS NOT NULL`). 손절선도 보유기한도 없이
+    무기한 방치됐다 — 2026-09-07 에 한화생명 -6.06%·우리금융지주 -4.18% 가 그 상태였다.
+
+    CLAUDE.md 가 이미 적어둔 대로다: **수량·평단은 계좌가 정본이고, 왜 샀는지는
+    우리가 정본이다.** 계좌는 진입 근거·무효화 조건을 모르므로 여기서 남기지 않으면
+    아무 데도 없다.
     """
     from decision import positions as P
 
@@ -283,14 +294,15 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
         if f.status != FILLED or f.qty <= 0:
             continue
         row = conn.execute(
-            "SELECT arm FROM order_intents WHERE intent_id=?", (f.intent_id,)
+            "SELECT arm, decision_id FROM order_intents WHERE intent_id=?", (f.intent_id,)
         ).fetchone()
         if row is None:
             # **아무 arm 에나 넣지 않는다.** 어느 계좌 것인지 모르는 체결을 1번에
             # 밀어넣으면 그 계좌의 수익률이 조용히 오염된다.
             log.error("%s: 주문 대장에 없는 체결이라 arm 을 알 수 없다 — 반영하지 않는다", f.code)
             continue
-        arm = row[0]
+        arm, decision_id = row
+        terms = entry_terms(conn, decision_id, f.code, fill_price=f.price)
         name = conn.execute("SELECT name FROM listing WHERE code=? LIMIT 1", (f.code,)).fetchone()
         P.open_position(
             conn,
@@ -301,9 +313,88 @@ def apply_fills(conn: sqlite3.Connection, fills: list[Fill], *, day: date | str)
             qty=f.qty,
             avg_price=f.price,
             opened_at=day,
+            entry_decision_id=decision_id,
+            **terms,
         )
         n += 1
     return n
+
+
+def _price_from(spec: dict | None, *, fill_price: int, atr: float | None, sign: int) -> int | None:
+    """`{type, value}` 를 가격으로 바꾼다. **ATR 을 모르면 값을 만들지 않는다.**
+
+    0 이나 체결가를 대신 넣으면 손절선이 있는 것처럼 보이면서 실제로는 즉시 걸리거나
+    영원히 안 걸린다. 없으면 NULL 이고, 그 사실이 보고서에 드러난다.
+    """
+    if not spec:
+        return None
+    kind, value = spec.get("type"), spec.get("value")
+    if value is None:
+        return None
+    if kind == "PRICE":
+        return int(value)
+    if kind == "PCT":
+        return round(fill_price * (1 + sign * value / 100))
+    if kind == "ATR":
+        if not atr:
+            return None
+        return round(fill_price + sign * value * atr)
+    return None
+
+
+def entry_terms(conn: sqlite3.Connection, decision_id: str, code: str, *, fill_price: int) -> dict:
+    """그 결정이 이 종목에 붙인 진입 조건. **없으면 빈 값이 아니라 NULL 이다.**
+
+    ATR 손절은 **체결가에서** 잰다. 결정 시점 종가가 아니라 실제로 들어간 가격이
+    기준이어야 손절폭이 의도한 배수가 된다.
+    """
+    out: dict = {
+        "entry_thesis": None,
+        "invalidation": None,
+        "stop_price": None,
+        "target_price": None,
+        "max_hold_days": None,
+    }
+    row = conn.execute(
+        "SELECT payload, pack_id FROM decisions WHERE decision_id=? ORDER BY attempt DESC LIMIT 1",
+        (decision_id,),
+    ).fetchone()
+    if row is None or not row[0]:
+        log.warning("%s: 결정 %s 을 찾지 못해 진입 조건 없이 연다", code, decision_id)
+        return out
+    payload, pack_id = row
+    d = next(
+        (x for x in (json.loads(payload).get("decisions") or []) if x.get("code") == code), None
+    )
+    if d is None:
+        log.warning("%s: 결정 %s 안에 이 종목이 없다 — 진입 조건 없이 연다", code, decision_id)
+        return out
+
+    reasons = d.get("reasons") or []
+    out["entry_thesis"] = " / ".join(reasons) or None
+    if d.get("invalidation"):
+        out["invalidation"] = json.dumps(d["invalidation"], ensure_ascii=False)
+    out["max_hold_days"] = d.get("max_hold_days")
+
+    atr = _atr_from_pack(conn, pack_id, code)
+    if atr is None and (d.get("stop") or {}).get("type") == "ATR":
+        log.warning("%s: 팩에서 ATR 을 찾지 못해 손절선을 세우지 못했다", code)
+    out["stop_price"] = _price_from(d.get("stop"), fill_price=fill_price, atr=atr, sign=-1)
+    out["target_price"] = _price_from(d.get("target"), fill_price=fill_price, atr=atr, sign=+1)
+    return out
+
+
+def _atr_from_pack(conn: sqlite3.Connection, pack_id: str | None, code: str) -> float | None:
+    """**그 결정이 본 팩**의 ATR 이다. 지금 다시 계산하면 결정과 다른 값이 된다."""
+    if not pack_id:
+        return None
+    row = conn.execute("SELECT payload FROM context_packs WHERE pack_id=?", (pack_id,)).fetchone()
+    if row is None:
+        return None
+    for u in json.loads(row[0]).get("universe") or []:
+        if u.get("code") == code:
+            return (u.get("indicators") or {}).get("atr14")
+    return None
 
 
 __all__ = [
@@ -315,5 +406,6 @@ __all__ = [
     "Fill",
     "SimBroker",
     "apply_fills",
+    "entry_terms",
     "size_for",
 ]
