@@ -68,6 +68,9 @@ def _seed_stock(
     f_days=0,
     i_days=0,
     net5=0.0,
+    # flow 채널은 이제 **양쪽이 함께 사야** 통과한다(OR → AND). 픽스처가 기관 순매수를
+    # 0 으로 두면 그 채널이 통째로 비고, 유니버스 최소 5종목에 걸려 팩이 거부된다.
+    inet5=None,
     market="KOSPI",
     is_pref=0,
     is_spac=0,
@@ -118,7 +121,7 @@ def _seed_stock(
             "foreign_net_days": f_days,
             "foreign_net_5d_eok_krw": net5,
             "inst_net_days": i_days,
-            "inst_net_5d_eok_krw": 0.0,
+            "inst_net_5d_eok_krw": net5 if inet5 is None else inet5,
             "foreign_hold_pct": 30.0,
             "short_ratio_pct": 1.0,
             "as_of": AS_OF.isoformat(),
@@ -217,7 +220,10 @@ def db():
     _seed_stock(conn, "000660", "SK하이닉스", rs=12.0, rsi=65)
     _seed_stock(conn, "005930", "삼성전자", rs=8.0, rsi=58)
     # 수급 채널
-    _seed_stock(conn, "035420", "네이버", ma_aligned=False, f_days=5, net5=300.0, cap=5000.0)
+    # flow 채널은 **양쪽이 함께 사고 거래대금이 살아 있어야** 통과한다 (2026-09-08)
+    _seed_stock(
+        conn, "035420", "네이버", ma_aligned=False, f_days=5, i_days=4, net5=300.0, cap=5000.0
+    )
     # 브리핑 채널 (모멘텀·수급 조건 미달)
     _seed_stock(conn, "051910", "LG화학", ma_aligned=False, rsi=40)
     _seed_briefing(conn, "051910")

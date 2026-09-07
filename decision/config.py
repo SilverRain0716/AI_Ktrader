@@ -52,6 +52,9 @@ BRIEFING_LOOKBACK_DAYS = 10
 BRIEFING_STANCES = ("주목", "조건부")
 MOMENTUM_RSI_RANGE = (50.0, 70.0)
 FLOW_MIN_NET_DAYS = 3
+# 거래대금이 20일 평균 아래면 flow 채널에서 뺀다. **매집 연속일수만으로는 부족하다** —
+# 실측에서 "거래대금 식고" 구간이 세 구간 모두 음수였다 (2026-09-08).
+FLOW_MIN_VOLUME_RATIO = 1.0
 
 # 유니버스가 이보다 적으면 스크리닝이 깨진 것으로 보고 팩 생성을 거부한다.
 MIN_UNIVERSE_SIZE = 5
