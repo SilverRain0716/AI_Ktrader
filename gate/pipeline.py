@@ -39,20 +39,49 @@ def task_status() -> int:
     return 0
 
 
+def _latest_ids(conn) -> list[str]:
+    """가장 최근 사이클의 **arm 전부**. 하나만 집으면 다른 arm 은 검사되지 않는다.
+
+    두 가지를 고쳤다 (2026-09-08 실측).
+
+    1. **`status='ok'` 만 보면 안 된다.** `abstain` 도 EXIT·TRIM 을 낸다 —
+       신규 진입만 안 하는 것이다. 그 필터 때문에 오늘 판단(둘 다 abstain)을
+       건너뛰고 **어제 것을 집어** 만료 차단만 찍었다.
+    2. **arm 을 하나만 집으면 안 된다.** 러너는 `check --latest` 를 한 번 부른다 —
+       arm 2 가 낸 매도 지시가 자동 사이클에서 **아예 게이트를 통과하지 못한다.**
+    """
+    row = conn.execute(
+        "SELECT pack_id, MAX(generated_at) FROM decisions "
+        "WHERE run_kind='live' AND status IN ('ok','abstain')"
+    ).fetchone()
+    if not row or not row[0]:
+        return []
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT decision_id FROM decisions WHERE run_kind='live' "
+            "AND status IN ('ok','abstain') AND pack_id = ? ORDER BY arm",
+            (row[0],),
+        )
+    ]
+
+
 def task_check(conn, decision_id: str | None, latest: bool, do_record: bool) -> int:
     if latest and not decision_id:
-        row = conn.execute(
-            "SELECT decision_id FROM decisions WHERE run_kind='live' AND status='ok' "
-            "ORDER BY generated_at DESC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            log.error("집행 대상 결정이 없다 (run_kind=live · status=ok)")
+        ids = _latest_ids(conn)
+        if not ids:
+            log.error("집행 대상 결정이 없다 (run_kind=live · status=ok/abstain)")
             return 1
-        decision_id = row[0]
+        # **arm 마다 따로 판정한다.** 한 arm 이 막혀도 다른 arm 은 나가야 한다.
+        rcs = [_check_one(conn, i, do_record) for i in ids]
+        return 0 if all(rc == 0 for rc in rcs) else 4
     if not decision_id:
         log.error("--decision 또는 --latest 가 필요하다")
         return 2
+    return _check_one(conn, decision_id, do_record)
 
+
+def _check_one(conn, decision_id: str, do_record: bool) -> int:
     v = gcheck.evaluate(conn, decision_id, deposit_krw=_deposit_if_needed(gcfg.arm_of(decision_id)))
     log.info("결정 %s · 모드 %s", v.decision_id, v.mode)
     for o in v.orders:
@@ -103,11 +132,8 @@ def _deposit_if_needed(arm: int) -> int | None:
 
 
 def _latest_live(conn) -> str | None:
-    row = conn.execute(
-        "SELECT decision_id FROM decisions WHERE run_kind='live' AND status='ok' "
-        "ORDER BY generated_at DESC LIMIT 1"
-    ).fetchone()
-    return row[0] if row else None
+    ids = _latest_ids(conn)
+    return ids[-1] if ids else None
 
 
 def task_place(conn, decision_id: str | None, latest: bool) -> int:

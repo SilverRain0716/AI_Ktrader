@@ -669,3 +669,76 @@ def test_abstain_이어도_매도는_접수된다(db, monkeypatch):
 
     got = db.execute("SELECT status, qty FROM order_intents WHERE code='005930'").fetchone()
     assert got == ("sent", 10), f"abstain 이라고 매도가 사라졌다: {got}"
+
+
+# ── --latest 가 무엇을 집는가 ───────────────────────────
+
+
+def _dec_row(db, did, *, pack, arm, status, at, decisions=None):
+    import json as _j
+
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES (?,'live',1,?,'s',?,'premarket',?,?,'r1',?,?)",
+        (
+            did,
+            pack,
+            arm,
+            at,
+            (NOW + timedelta(hours=5)).isoformat(),
+            status,
+            _j.dumps({"decisions": decisions or []}),
+        ),
+    )
+
+
+def test_latest_는_abstain_도_집는다(db):
+    """`abstain` 도 EXIT·TRIM 을 낸다 — 신규 진입만 안 하는 것이다.
+
+    `status='ok'` 만 보던 탓에 오늘 판단(둘 다 abstain)을 건너뛰고 **어제 것을
+    집어** 만료 차단만 찍었다 (2026-09-08 실측).
+    """
+    from gate import pipeline as gp
+
+    _dec_row(db, "OLD-a1", pack="P1", arm=1, status="ok", at="2026-09-07T09:56:00+09:00")
+    _dec_row(db, "NEW-a1", pack="P2", arm=1, status="abstain", at="2026-09-08T10:32:00+09:00")
+    assert gp._latest_ids(db) == ["NEW-a1"]
+
+
+def test_latest_는_arm_전부를_집는다(db):
+    """러너는 `check --latest` 를 **한 번** 부른다. 하나만 집으면
+    **arm 2 가 낸 매도 지시가 자동 사이클에서 게이트를 통과하지 못한다.**
+    """
+    from gate import pipeline as gp
+
+    at = "2026-09-08T10:32:00+09:00"
+    _dec_row(db, "N-a1", pack="P2", arm=1, status="abstain", at=at)
+    _dec_row(db, "N-a2", pack="P2", arm=2, status="ok", at=at)
+    assert gp._latest_ids(db) == ["N-a1", "N-a2"]
+
+
+def test_실험_결정은_latest_에_안_잡힌다(db):
+    from gate import pipeline as gp
+
+    db.execute(
+        "INSERT INTO decisions (decision_id,run_kind,attempt,pack_id,pack_sha256,arm,cycle,"
+        "generated_at,valid_until,render_version,status,payload) "
+        "VALUES ('X-a1','experiment',1,'P9','s',1,'premarket',?,?,'r1','ok','{}')",
+        ("2026-09-08T11:00:00+09:00", (NOW + timedelta(hours=5)).isoformat()),
+    )
+    _dec_row(db, "N-a1", pack="P2", arm=1, status="ok", at="2026-09-08T10:32:00+09:00")
+    assert gp._latest_ids(db) == ["N-a1"]
+
+
+def test_한_arm_이_막혀도_다른_arm_은_판정한다(db, caplog):
+    """arm 마다 따로 판정한다 — 하나가 만료됐다고 다른 쪽이 사라지면 안 된다."""
+    from gate import pipeline as gp
+
+    at = "2026-09-08T10:32:00+09:00"
+    _dec_row(db, "N-a1", pack="P2", arm=1, status="ok", at=at)
+    _dec_row(db, "N-a2", pack="P2", arm=2, status="ok", at=at)
+    with caplog.at_level("INFO"):
+        gp.task_check(db, None, True, False)
+    seen = " ".join(r.getMessage() for r in caplog.records)
+    assert "N-a1" in seen and "N-a2" in seen
