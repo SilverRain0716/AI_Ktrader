@@ -48,6 +48,18 @@ _EXTERNAL_CREDENTIALS = (
     "OPENAI_API_KEY",
     "AIK_LLM_PROVIDER",
     "AIK_LLM_MODEL",
+    # **키움도 여기 있어야 한다.** 목록이 LLM 키만 덮고 있어서, 장중 사이클 팩을
+    # 만드는 테스트가 **실제 증권사 API 를 때리고 있었다** — 2026-09-08 에
+    # premarket 을 장중 사이클로 바꾸자 `price_as_of` 가 매번 달라져 결정론
+    # 테스트가 깨지면서 드러났다. 그전에는 조용히 나가고 있었다.
+    "KIWOOM_APP_KEY",
+    "KIWOOM_APP_SECRET",
+    "KIWOOM_MOCK_APP_KEY",
+    "KIWOOM_MOCK_APP_SECRET",
+    "KIWOOM_MOCK2_APP_KEY",
+    "KIWOOM_MOCK2_APP_SECRET",
+    "KIWOOM_REST_BASE",
+    "KIWOOM_ORDER_BASE",
 )
 
 
@@ -72,3 +84,11 @@ def _risk_limits(monkeypatch):
     """
     for name, value in TEST_LIMITS.items():
         monkeypatch.setenv(name, value)
+
+
+def test_키움_자격증명도_지운다():
+    """LLM 키만 덮고 있어서 장중 팩 테스트가 **실제 증권사 API 를 때렸다** (2026-09-08).
+
+    목록에서 빠지면 테스트가 느려지고 비결정적이 되며, 그 사실이 겉으로 안 보인다.
+    """
+    assert {"KIWOOM_APP_KEY", "KIWOOM_APP_SECRET"} <= set(_EXTERNAL_CREDENTIALS)

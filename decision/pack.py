@@ -407,11 +407,18 @@ def attach_news(items: list[dict], dq: dict, *, now: datetime, client=None) -> N
 
 # 장이 열려 있는 사이클. premarket 은 개장 전이므로 전일 종가가 **맞는** 값이고,
 # postmarket 은 배치가 곧 도는 시각이라 덮어쓸 이유가 없다.
-LIVE_SESSIONS = ("midday", "preclose", "event")
+# **premarket 이 여기 있는 이유**: 2026-09-08 에 그 사이클을 08:20 → 09:00 으로
+# 옮겼다. 09:00 은 개장 직후라 장이 열려 있다 — 전 거래일 종가로 판단하면
+# 시가와 개장 직후 움직임을 통째로 못 본다.
+#
+# 그전(08:20)에는 여기 없는 것이 맞았다. **그래서 2026-09-08 이전의
+# `cycle='premarket'` 결정은 `spot: null` 이다** — 그 뒤와 나란히 놓고 비교하면
+# 입력이 다른 두 층을 이어 붙이는 것이 된다.
+LIVE_SESSIONS = ("premarket", "midday", "preclose", "event")
 
 
 def _overlay_spot(pack: dict, cycle: str, *, client=None) -> None:
-    """유니버스·포지션의 가격을 장중 현재가로 덮는다.
+    """유니버스·포지션의 가격을 장중 현재가로 덮는다. **`spot` 에만 담는다.**
 
     **못 덮으면 덮은 척하지 않는다.** 팩의 `data_quality.price_source` 가 무엇을 실었는지
     말하고, 실패하면 경고가 남는다 — 전 거래일 종가를 장중 가격인 것처럼 넘기면
