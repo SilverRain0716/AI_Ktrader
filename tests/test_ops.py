@@ -143,9 +143,10 @@ def test_실패하면_락을_남기지_않는다(monkeypatch):
 @pytest.mark.parametrize(
     ("hhmm", "cycle"),
     [
-        ((8, 20), "premarket"),
-        ((8, 39), "premarket"),
-        ((9, 0), None),
+        # premarket 은 2026-09-08 에 08:20 → 09:00 으로 옮겼다 (개장 직후)
+        ((9, 0), "premarket"),
+        ((9, 19), "premarket"),
+        ((8, 20), None),
         ((12, 20), "midday"),
         ((15, 5), "preclose"),
         ((18, 0), "data"),

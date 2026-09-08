@@ -160,9 +160,11 @@ def test_장중_사이클은_현재가로_덮는다(cycle) -> None:
     )
 
 
-@pytest.mark.parametrize("cycle", ["premarket", "postmarket"])
+# **premarket 은 빠졌다.** 2026-09-08 에 08:20 → 09:00 으로 옮기면서 장중 사이클이
+# 됐다 — 개장 직후라 전 거래일 종가로 판단하면 시가를 통째로 못 본다.
+@pytest.mark.parametrize("cycle", ["postmarket"])
 def test_장_밖_사이클은_전일_종가가_맞는_값이다(cycle) -> None:
-    """개장 전에는 전일 종가가 오류가 아니라 정답이다. 부르지도 않는다."""
+    """장 마감 뒤에는 그날 종가가 오류가 아니라 정답이다. 부르지도 않는다."""
     from decision import pack as packmod
 
     p = _pack_stub()
@@ -279,7 +281,7 @@ def test_장중_값을_못_받으면_spot_은_null_이다() -> None:
     from decision import pack as packmod
 
     p = _pack_stub()
-    packmod._overlay_spot(p, "premarket", client=None)
+    packmod._overlay_spot(p, "postmarket", client=None)
     assert p["universe"][0]["spot"] is None
     assert p["positions"][0]["spot"] is None
 
