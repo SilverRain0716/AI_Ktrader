@@ -682,7 +682,23 @@ def main(argv: list[str] | None = None) -> int:
         elif args.task == "ohlcv-integrated":
             task_ohlcv_integrated(conn, limit=args.limit)
         elif args.task == "daily":
-            task_listing(conn)
+            # **종목 마스터가 실패해도 일봉은 받는다.** 상류(FDR→KRX)가 404 를 내면
+            # 첫 단계에서 배치 전체가 죽어 **일봉·수급·공시가 통째로 안 들어온다** —
+            # 2026-09-10 에 실제로 그랬고, 그 사이 판단이 "일봉이 3회분 낡았다"로 거부됐다.
+            #
+            # 마스터는 하루 낡아도 된다(이미 2,765행이 있다). **일봉은 하루도 안 된다.**
+            # 다만 **비어 있으면 멈춘다** — 유니버스가 통째로 없는 채로 도는 것이 더 나쁘다.
+            try:
+                task_listing(conn)
+            except Exception as e:
+                have = conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]
+                if not have:
+                    log.error(
+                        "종목 마스터가 비어 있는데 조회도 실패했다 — %s: %s", type(e).__name__, e
+                    )
+                    return 1
+                log.error("종목 마스터 갱신 실패 — %s: %s", type(e).__name__, e)
+                log.error("  기존 %d행으로 계속한다. **신규 상장·상폐가 반영되지 않는다**", have)
             task_ohlcv(conn, limit=args.limit, full=args.full)
             task_flows(conn, limit=args.limit, pages=args.pages)
             task_disclosures(conn, days=args.days)

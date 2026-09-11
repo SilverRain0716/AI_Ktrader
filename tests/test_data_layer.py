@@ -366,3 +366,90 @@ def test_KOSPI는_소속부가_없어_이_신호만으로는_판정할_수_없�
     from data.sources import listing as ls
 
     assert ls.is_managed_dept(None) is False  # KOSPI 의 실제 값
+
+
+# ── 배치 복원력 ─────────────────────────────────────────
+
+
+def test_종목_마스터가_실패해도_일봉은_받는다(monkeypatch, tmp_path):
+    """상류(FDR→KRX)가 404 를 내면 첫 단계에서 **배치 전체가 죽는다.**
+
+    2026-09-10 에 실제로 그랬고, 일봉·수급·공시가 통째로 안 들어와
+    판단이 *"일봉이 3회분 낡았다"* 로 거부됐다. 그 사실을 이틀 동안 아무도 몰랐다.
+
+    마스터는 하루 낡아도 된다(이미 2,765행). **일봉은 하루도 안 된다.**
+    """
+    from data import pipeline as dp
+    from data import store
+
+    ran = []
+    conn = sqlite3.connect(":memory:")
+    store.init_db(conn)
+    conn.execute(
+        "INSERT INTO listing (code,name,market,is_preferred,is_spac,is_managed,updated_at) "
+        "VALUES ('005930','삼성전자','KOSPI',0,0,0,'x')"
+    )
+
+    def boom(_c):
+        raise RuntimeError("KRX 조회 실패: HTTP Error 404")
+
+    monkeypatch.setattr(dp, "task_listing", boom)
+    for name in (
+        "task_ohlcv",
+        "task_flows",
+        "task_disclosures",
+        "task_briefings",
+        "task_margin",
+        "task_indicators",
+        "task_status",
+    ):
+        monkeypatch.setattr(dp, name, lambda *a, _n=name, **k: ran.append(_n))
+    monkeypatch.setattr(store, "connect", lambda *a, **k: _ctx(conn))
+
+    assert dp.main(["daily"]) == 0
+    assert "task_ohlcv" in ran, "마스터 실패가 일봉을 막았다"
+
+
+def test_마스터가_비어_있는데_조회도_실패하면_멈춘다(monkeypatch):
+    """유니버스가 통째로 없는 채로 도는 것이 더 나쁘다 — **fail-closed.**"""
+    from data import pipeline as dp
+    from data import store
+
+    ran = []
+    conn = sqlite3.connect(":memory:")
+    store.init_db(conn)  # listing 비어 있다
+
+    monkeypatch.setattr(dp, "task_listing", lambda _c: (_ for _ in ()).throw(RuntimeError("404")))
+    monkeypatch.setattr(dp, "task_ohlcv", lambda *a, **k: ran.append("ohlcv"))
+    monkeypatch.setattr(store, "connect", lambda *a, **k: _ctx(conn))
+
+    assert dp.main(["daily"]) == 1
+    assert not ran, "마스터가 빈 채로 일봉을 받았다"
+
+
+def test_read_html_파서가_의존성에_선언돼_있다():
+    """`naver.py` 가 `pd.read_html` 을 쓰는데 파서가 **선언 안 돼 있었다** —
+    전이 의존성으로 딸려 오다가 사라지자 수급이 **전 종목 실패**했다(2026-09-10).
+    배치는 그대로 "성공"으로 끝났다.
+    """
+    import tomllib
+    from pathlib import Path
+
+    cfg = tomllib.loads(
+        (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    extras = " ".join(cfg["project"]["optional-dependencies"]["data"])
+    assert "html5lib" in extras or "lxml" in extras, f"read_html 파서가 없다: {extras}"
+
+
+class _ctx:
+    """`store.connect()` 를 대신한다 — 컨텍스트 매니저 모양만 맞춘다."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self.conn
+
+    def __exit__(self, *a):
+        return False
